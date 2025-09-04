@@ -1,0 +1,2517 @@
+---
+title: "Seurat - RCC analysis"
+output:
+  html_document:
+    theme: united
+    df_print: kable
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+```{r setup, include=FALSE}
+all_times <- list()  # store the time for each chunk
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now, units = "secs")
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+	error = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	tidy = TRUE,
+	tidy.opts = list(width.cutoff = 95),
+	time_it = TRUE
+)
+```
+
+`knitr` will automatically measure how long each code chunk takes to run and store these times in the `all_times` list, keyed by the chunk's label. This is very useful for profiling your analysis and identifying steps that take a long time. The global options ensure this timing (and other output suppression) happens for all chunks unless explicitly overridden for a specific chunk.
+
+# SETUP SEURAT OBJECT
+
+# [###QC parameter variables]{.underline} \@\@\@
+
+```{r setup_parameters}
+
+# FILTERING QC1
+min_cells_threshold <- 3      # Genes in < this many cells removed; # Minimum number of cells a gene must be detected in to be kept.
+min_features_threshold <- 200 # Cells with < this many features (from RNA assay) removed; Minimum number of genes (features) a cell must have to be kept.
+
+# FILTERING QC2
+min_features <- 200
+max_features <- 2500.     # Cells with nFeature_RNA > this removed (upper bound for nFeature_RNA from RNA assay)
+min_ribo_percent <- 12    # Cells with percent.ribo < this removed (keep >= limit_ribo)
+
+# VARIATION
+variables_to_regress <- c()   # Define actual variables if any, e.g., c("percent.mt", "nCount_RNA")
+
+# SCENARIO FOR VARIABLE FEATURES (applied to 'integrated' assay's variable features)
+# scenario_name <- "Scenario_1_No_IgVDJ"       ; exclude_sets_for_scenario <- c("ig_vdj")
+# scenario_name <- "Scenario_2_No_Ig_Const"    ; exclude_sets_for_scenario <- c("ig_constant")
+# scenario_name <- "Scenario_3_No_IgLL"        ; exclude_sets_for_scenario <- c("igll")
+# scenario_name <- "Scenario_4_No_TCR"         ; exclude_sets_for_scenario <- c("tcr")
+# scenario_name <- "Scenario_5_No_Removal"     ; exclude_sets_for_scenario <- c()
+# scenario_name <- "Scenario_6_Remove_All_Sets"  ; exclude_sets_for_scenario <- c("ig_vdj", "ig_constant", "igll", "tcr")
+scenario_name <- "Scenario_Keep_IgConstant_No_VDJ" ;exclude_sets_for_scenario <- c("ig_vdj", "igll", "tcr") # Keeps "ig_constant"
+# scenario_name <- "Scenario_Keep_IgConstant_and_IgLL"; exclude_sets_for_scenario <- c("ig_vdj", "tcr")
+
+# FILTERING
+nfeat = 2000 # selection of the number of highly variable features
+
+# CLUSTERING
+dimen <- 18 # Number of PCA dimensions to use
+resol <- 1 # Clustering resolution
+
+```
+
+# 1.Original paper file
+
+### Loading the Seurat object for RRC
+
+Correct directory for the data:
+
+```{r}
+getwd()
+```
+
+```{r init}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+library(viridis) # For color scales in the composition plot
+```
+
+### represent UMAP object
+
+The previous rds file has no UMAP image, but more features, for the paper, Isabella used another file that we are going to use here only for UMAP representation.
+
+```{r}
+# Define the full path to the .rds file
+rds_file_path <- "./Data/RCC_label_vS.rds"
+
+# Load the object from the .rds file
+# You can name the loaded object whatever you want
+RCC_dataset_NoVDJ <- readRDS(file = rds_file_path)
+
+# Now the object is loaded into the variable 'RCC_dataset'
+```
+
+check the seurat object
+
+```{r}
+colnames(RCC_dataset_NoVDJ@meta.data)
+```
+
+```{r}
+RCC_dataset_NoVDJ
+# see that the initial has  UMAP
+names(RCC_dataset_NoVDJ@reductions)
+```
+
+Clustering of the scVI-derived embeddings identifies 15 transcriptionally distinct clusters in RCC (Figure 1A).![](images/clipboard-1324887862.png)
+
+```{r}
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "labels_RCC", label = TRUE,repel = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "integrated_snn_res.0.5", label = TRUE,repel = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "patient", label = TRUE,repel = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "predicted_labels", label = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "SampleID", label = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "PatientID", label = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "celltype", label = TRUE)
+# Assuming you have a metadata column named "orig.ident"
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "orig.ident")
+```
+
+### Metadata (samples)
+
+Renaming the samples:
+
+```{r}
+# --- Create a new 'sample' column by renaming 'patient' values (Corrected Method) ---
+
+# 1. Get the patient data from your Seurat object
+# We convert it to a character vector to avoid potential issues with factors
+original_patient_ids <- as.character(RCC_dataset_NoVDJ$patient)
+
+# 2. Find all unique patient IDs that start with "D36_RC"
+d36_patients_to_rename <- unique(grep("^D36_RC", original_patient_ids, value = TRUE))
+
+# 3. Create the new names for these patients ("RCC_D36_1", "RCC_D36_2", etc.)
+new_sample_names <- paste0("RCC_D36_", seq_along(d36_patients_to_rename))
+
+# 4. Create the "lookup table" or "map" to connect old names to new names
+name_map <- setNames(new_sample_names, d36_patients_to_rename)
+
+# 5. Create the new sample column
+# Start by creating a direct copy of the original patient IDs
+new_sample_column <- original_patient_ids
+
+# Now, selectively replace only the values that are in our map
+for (old_name in names(name_map)) {
+  new_name <- name_map[[old_name]]
+  new_sample_column[new_sample_column == old_name] <- new_name
+}
+
+# 6. Add this corrected column to the Seurat object's metadata
+RCC_dataset_NoVDJ <- AddMetaData(
+  object = RCC_dataset_NoVDJ,
+  metadata = new_sample_column,
+  col.name = "sample"
+)
+
+
+# --- Verification Steps ---
+cat("--- Verification ---\n")
+
+# Show the mapping that was created and applied
+cat("\nThe following mapping was used for renaming:\n")
+print(name_map)
+
+# Show a cross-tabulation to confirm the changes
+cat("\nComparison of original 'patient' column and new 'sample' column:\n")
+print(table(Original = RCC_dataset_NoVDJ$patient, New = RCC_dataset_NoVDJ$sample))
+```
+
+Done. Let check in the graph:
+
+```{r}
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "sample", label = TRUE, repel = TRUE)
+DimPlot(RCC_dataset_NoVDJ, reduction = "umap", group.by = "labels_RCC", label = TRUE, repel = TRUE)
+```
+
+Split by individual sample, create UMAP plots for your `RCC_dataset_NoVDJ` object, split by the `sample` column created
+
+```{r}
+# --- UMAP Plot Split by Sample, Colored by Cluster ID ---
+
+# This plot creates a separate UMAP for each unique value in your 'sample' column.
+# Cells are colored by the default active identity (e.g., seurat_clusters).
+umap_by_sample_clusters <- DimPlot(
+  RCC_dataset_NoVDJ,
+  reduction = "umap",
+  split.by = "sample",      # Changed to split by your 'sample' column
+  label = TRUE,
+  label.size = 3,
+  repel = TRUE              # Prevents labels from overlapping
+) + NoLegend()              # Optional: removes the legend
+
+print(umap_by_sample_clusters)
+
+
+# --- UMAP Plot Split by Sample, Colored by Cell Type ---
+
+# This plot also splits by 'sample', but colors the cells by your 'labels_RCC' annotation.
+# This is great for comparing cell type composition across your samples.
+umap_by_sample_celltype <- DimPlot(
+  RCC_dataset_NoVDJ,
+  reduction = "umap",
+  split.by = "sample",      # Changed to split by your 'sample' column
+  group.by = "labels_RCC",  # Changed to group by your cell annotation column
+  label = FALSE
+)
+
+print(umap_by_sample_celltype)
+```
+
+### Composition Plot Code
+
+This code calculates the percentage of each cell type within each sample and plots it as a stacked bar chart.
+
+#### whole dataset
+
+This code calculates the percentage of each cell type within each sample and plots it as a stacked bar chart.
+
+```{r}
+# --- Generate Overall Cluster Composition Plot ---
+
+# 1. Extract metadata and calculate proportions for the whole dataset
+overall_composition <- RCC_dataset_NoVDJ@meta.data %>%
+  # Group only by the cell type column
+  dplyr::group_by(labels_RCC) %>%
+  # Count the number of cells in each cell type
+  dplyr::tally() %>%
+  # Ungroup and calculate the proportion relative to the total number of cells
+  dplyr::ungroup() %>%
+  dplyr::mutate(proportion = n / sum(n))
+
+# 2. Create the bar plot with ggplot2
+overall_plot <- ggplot(overall_composition, aes(x = labels_RCC, y = proportion, fill = labels_RCC)) +
+  geom_col() + # Creates the bar chart
+  scale_y_continuous(labels = scales::percent_format()) + # Format y-axis as percentage
+  scale_fill_viridis_d(option = "D") + # Optional: use a nice color palette
+  labs(
+    title = "Overall Cell Type Composition",
+    x = "Cell Type",
+    y = "Proportion of Total Cells"
+  ) +
+  theme_classic() +
+  # Hide the redundant legend and rotate x-axis labels for readability
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none" 
+  )
+
+# 3. Print the plot
+print(overall_plot)
+```
+
+```{r}
+# --- Generate a Single Stacked Bar for Overall Composition ---
+
+# 1. Calculate the proportion of each cell type (same as before)
+overall_composition <- RCC_dataset_NoVDJ@meta.data %>%
+  dplyr::group_by(labels_RCC) %>%
+  dplyr::tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(proportion = n / sum(n))
+
+# 2. Create the single stacked bar plot
+single_stack_plot <- ggplot(overall_composition, aes(x = "Total Composition", y = proportion, fill = labels_RCC)) +
+  geom_col(position = "stack", width = 0.5) + # Use geom_col to stack the proportions
+  scale_y_continuous(labels = scales::percent_format()) + # Format y-axis as percentage
+  scale_fill_viridis_d(option = "D") + # Use a consistent color palette
+  labs(
+    title = "Overall Cell Type Composition",
+    x = NULL, # Remove the x-axis label
+    y = "Proportion",
+    fill = "Cell Type"
+  ) +
+  theme_classic() +
+  # Remove x-axis ticks and text for a cleaner look
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+# 3. Print the plot
+print(single_stack_plot)
+```
+
+#### for each sample
+
+```{r}
+# --- Generate a Cluster Composition Plot ---
+
+# 1. Extract the metadata and calculate cell counts
+# We group by both 'sample' and 'labels_RCC' and count the number of cells in each group.
+composition_data <- RCC_dataset_NoVDJ@meta.data %>%
+  dplyr::group_by(sample, labels_RCC) %>%
+  dplyr::tally() %>%
+  
+  # 2. Calculate the proportion of each cell type within each sample
+  # We group by just 'sample' now to calculate percentages within that sample.
+  dplyr::group_by(sample) %>%
+  dplyr::mutate(proportion = n / sum(n))
+
+# 3. Create the stacked bar plot with ggplot2
+composition_plot <- ggplot(composition_data, aes(x = sample, y = proportion, fill = labels_RCC)) +
+  geom_col(position = "stack") + # Use geom_col for pre-calculated values
+  scale_y_continuous(labels = scales::percent_format()) + # Format y-axis as percentage
+  scale_fill_viridis_d(option = "D") + # Use the viridis color palette
+  labs(
+    title = "Cell Type Composition by Sample",
+    x = "Sample",
+    y = "Proportion",
+    fill = "Cell Type (labels_RCC)"
+  ) +
+  theme_classic() +
+  # Optional: Rotate x-axis labels if they overlap
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+# 4. Print the plot
+print(composition_plot)
+```
+
+### Purity
+
+```{r}
+# Load necessary libraries if you haven't already
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+
+# --- 1. Define the Adapted Plotting Function ---
+
+generate_sample_composition_plot <- function(
+    base_seurat_object, 
+    sample_id_to_plot,
+    cluster_col = "seurat_clusters", # Default cluster column
+    phenotype_col = "labels_RCC"     # The phenotype column you want to use
+) {
+  
+  cat(paste0("\n--- Generating Composition Plot for Sample: ", sample_id_to_plot, " ---\n"))
+  
+  # Subset the main object to get data for the specific sample
+  sample_subset_object <- subset(base_seurat_object, subset = sample == sample_id_to_plot)
+  
+  if (ncol(sample_subset_object) == 0) {
+    cat("No cells found for sample:", sample_id_to_plot, ". Skipping plot.\n")
+    return(NULL)
+  }
+  
+  # Create a frequency table: clusters vs. phenotypes (labels_RCC)
+  phenotype_counts <- table(
+    sample_subset_object[[cluster_col, drop = TRUE]], 
+    sample_subset_object[[phenotype_col, drop = TRUE]]
+  )
+  
+  if (nrow(phenotype_counts) == 0 || ncol(phenotype_counts) == 0) {
+    cat("No cluster/phenotype data for sample:", sample_id_to_plot, ". Skipping plot.\n")
+    return(NULL)
+  }
+  
+  # Convert counts to proportions within each cluster
+  phenotype_prop <- prop.table(phenotype_counts, margin = 1)
+  phenotype_df <- as.data.frame(phenotype_prop, stringsAsFactors = FALSE)
+  colnames(phenotype_df) <- c("Cluster", "Phenotype", "Proportion")
+  
+  # --- Logic to order clusters by purity (same as original script) ---
+  
+  # Find the most prevalent phenotype for each cluster
+  most_prevalent_phenotype <- apply(phenotype_counts, 1, function(x) names(which.max(x)))
+  
+  # Calculate the "purity" of each cluster (proportion of its most prevalent phenotype)
+  purity_per_cluster <- sapply(rownames(phenotype_prop), function(cl) max(phenotype_prop[cl, ], na.rm = TRUE))
+  
+  # Order cluster names by decreasing purity
+  ordered_cluster_levels <- names(sort(purity_per_cluster, decreasing = TRUE, na.last = TRUE))
+  
+  # Apply this ordering to the data frame
+  phenotype_df$Cluster <- factor(phenotype_df$Cluster, levels = ordered_cluster_levels)
+  
+  # Create new labels for the x-axis: "Cluster_ID (Most_Prevalent_Phenotype)"
+  new_x_axis_labels <- paste0(
+    ordered_cluster_levels,
+    " (",
+    most_prevalent_phenotype[ordered_cluster_levels],
+    ")"
+  )
+  
+  # --- Plotting with ggplot2 ---
+  
+  plot_title <- paste("Cluster Composition by Phenotype for Sample:", sample_id_to_plot)
+  
+  plot_composition <- ggplot(phenotype_df, aes(x = Cluster, y = Proportion, fill = Phenotype)) +
+    geom_bar(stat = "identity", color = "black", linewidth = 0.2, width = 0.9) +
+    scale_fill_viridis_d(option = "D", name = "Phenotype (labels_RCC)") +
+    scale_x_discrete(labels = new_x_axis_labels) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+      title = plot_title,
+      x = "Cluster (Most Prevalent Phenotype) - Ordered by Purity",
+      y = "Proportion of Cells within Cluster"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+      axis.title.x = element_text(size = 11, margin = margin(t = 10)),
+      axis.title.y = element_text(size = 11, margin = margin(r = 10)),
+      legend.position = "right",
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+  
+  print(plot_composition)
+  return(plot_composition)
+}
+
+# --- 2. Call the Function for Each Sample ---
+
+# Get a list of all unique sample IDs from your object
+samples_to_plot <- unique(RCC_dataset_NoVDJ$sample)
+composition_plots <- list() # Optional: store the generated plots in a list
+
+# Loop through each sample ID and generate a plot
+for (sample_id in samples_to_plot) {
+  composition_plots[[sample_id]] <- generate_sample_composition_plot(
+    base_seurat_object = RCC_dataset_NoVDJ,
+    sample_id_to_plot = sample_id,
+    phenotype_col = "labels_RCC" # Explicitly state the phenotype column
+  )
+}
+```
+
+### How many Ig related genes?
+
+dsa
+
+```{r Identifying Ig related genes}
+# --- Define Your Gene Lists and Patterns ---
+
+# 1. Explicit list of Ig constant genes and others
+ig_constant_genes_list <- c(
+  "IGHM", "IGHD", "IGHE", "IGHA1", "IGHA2",
+  "IGHG1", "IGHG2", "IGHG3", "IGHG4",
+  "IGKC",
+  "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7",
+  "AC233755.1"
+)
+
+# 2. Regular expression patterns
+ig_vdj_regex <- "^IG[HKL][VDJ]" # Ig V(D)J genes
+igll_regex <- "^IGLL"          # IGLL genes
+tcr_regex <- "^TR[ABGD][CV]"   # TCR V/C genes
+
+# --- Find the Genes in Your RRC_filtered Object ---
+
+# Get all gene names from the object for efficient searching
+all_genes <- rownames(RCC_dataset_NoVDJ)
+
+# Find genes from the explicit list
+found_constant_genes <- ig_constant_genes_list[ig_constant_genes_list %in% all_genes]
+
+# Find genes using regular expression patterns
+found_ig_vdj_genes <- grep(ig_vdj_regex, all_genes, value = TRUE)
+found_igll_genes <- grep(igll_regex, all_genes, value = TRUE)
+found_tcr_genes <- grep(tcr_regex, all_genes, value = TRUE)
+
+
+# --- Print the Results with Counts ---
+cat("--- Genes Found in  RCC_dataset_NoVDJ---\n\n")
+
+# Use length() to count the number of genes in each vector
+cat("✅ 1. Ig Constant & Specific Genes Found (", length(found_constant_genes), " total):\n", sep="")
+print(found_constant_genes)
+cat("\n-------------------------------------\n")
+
+cat("✅ 2. Ig V(D)J Genes Found (", length(found_ig_vdj_genes), " total):\n", sep="")
+print(found_ig_vdj_genes)
+cat("\n-------------------------------------\n")
+
+cat("✅ 3. IGLL Genes Found (", length(found_igll_genes), " total):\n", sep="")
+print(found_igll_genes)
+cat("\n-------------------------------------\n")
+
+cat("✅ 4. TCR Genes Found (", length(found_tcr_genes), " total):\n", sep="")
+print(found_tcr_genes)
+```
+
+# 2.Full dataset Analysis
+
+Load the file of RCC dataset with "labels_RCC" with the B cell predefined labels:
+
+RCC_label_v2.rds into a Seurat object:
+
+```{r}
+# Define the full path to the .rds file
+rds_file_path <- "./Data/RCC_label_v2.rds"
+
+# Load the object from the .rds file
+# You can name the loaded object whatever you want
+RCC_dataset <- readRDS(file = rds_file_path)
+
+# Now the object is loaded into the variable 'RCC_dataset'
+```
+
+**Independent clustering of B cells across cancer types reveals an enrichment of DN B cells in RCC**
+
+we applied single-cell Variational Inference (scVI) to separately integrate and cluster the available single-cell B cell datasets for each cancer type. After filtering out low-quality cells and excluding plasma cells to better preserve B cell subset granularity, a total of 18782 single cells *f*rom 9 RCC patients
+
+```         
+18782 cells and 18577 features.(Version2:31065 features)
+```
+
+### Checking the object:
+
+It already filtered as in the paper?
+
+```{r}
+cat("RCC_dataset: ")
+#Checking the obejct.
+UpdateSeuratObject(RCC_dataset)
+```
+
+Update just in case
+
+```{r}
+# It's good practice to update the object to the latest Seurat version
+RCC_dataset <- UpdateSeuratObject(RCC_dataset)
+```
+
+General overview:
+
+```{r}
+print(head(RCC_dataset))
+print(head(RCC_dataset@meta.data))
+colnames(RCC_dataset@meta.data)
+
+unique(RCC_dataset$celltype)
+```
+
+The relevnat column are :
+
+```         
+"labels_RCC"
+"predicted_labels"
+"PatientID"
+"SampleID"
+"celltype"
+"patient"
+"dataid"   
+```
+
+What are the unique values of each column?
+
+```{r}
+# --- Sample and Patient Identifiers ---
+cat("\nAvailable unique values for 'orig.ident':\n")
+print(unique(RCC_dataset$orig.ident))
+
+cat("\nAvailable unique values for 'SampleID':\n")
+print(unique(RCC_dataset$SampleID))
+
+cat("\nAvailable unique values for 'PatientID':\n")
+print(unique(RCC_dataset$PatientID))
+
+cat("\nAvailable unique values for 'patient':\n")
+print(unique(RCC_dataset$patient))
+
+cat("\nAvailable unique values for 'dataid':\n")
+print(unique(RCC_dataset$dataid))
+
+cat("\nAvailable unique values for 'Cell':\n")
+print(unique(RCC_dataset$Cell))
+
+# cat("\nAvailable unique values for 'V1':\n")
+# print(unique(RCC_dataset$V1))
+
+cat("\nAvailable unique values for 'orig.ident.x':\n")
+print(unique(RCC_dataset$orig.ident.x))
+
+cat("\nAvailable unique values for 'orig.ident.y':\n")
+print(unique(RCC_dataset$orig.ident.y))
+
+# # --- Quality Control (QC) Metrics & Counts ---
+# # Note: These are numeric and may have many unique values
+# cat("\nAvailable unique values for 'nCount_RNA':\n")
+# print(unique(RCC_dataset$nCount_RNA))
+# 
+# cat("\nAvailable unique values for 'nFeature_RNA':\n")
+# print(unique(RCC_dataset$nFeature_RNA))
+# 
+# cat("\nAvailable unique values for 'percent.mt':\n")
+# print(unique(RCC_dataset$percent.mt))
+# 
+# cat("\nAvailable unique values for 'n_genes':\n")
+# print(unique(RCC_dataset$n_genes))
+# 
+# cat("\nAvailable unique values for 'n_counts':\n")
+# print(unique(RCC_dataset$n_counts))
+
+# --- Cell Type and Tissue Annotations ---
+cat("\nAvailable unique values for 'Annotation':\n")
+print(unique(RCC_dataset$Annotation))
+
+cat("\nAvailable unique values for 'annotation':\n")
+print(unique(RCC_dataset$annotation))
+
+cat("\nAvailable unique values for 'Anno':\n")
+print(unique(RCC_dataset$Anno))
+
+cat("\nAvailable unique values for 'celltype':\n")
+print(unique(RCC_dataset$celltype))
+
+cat("\nAvailable unique values for 'newcell_type':\n")
+print(unique(RCC_dataset$newcell_type))
+
+cat("\nAvailable unique values for 'broad_type':\n")
+print(unique(RCC_dataset$broad_type))
+
+cat("\nAvailable unique values for 'Tissue':\n")
+print(unique(RCC_dataset$Tissue))
+
+cat("\nAvailable unique values for 'Tissue_subset_ident':\n")
+print(unique(RCC_dataset$Tissue_subset_ident))
+
+cat("\nAvailable unique values for 'region':\n")
+print(unique(RCC_dataset$region))
+
+cat("\nAvailable unique values for 'site':\n")
+print(unique(RCC_dataset$site))
+
+cat("\nAvailable unique values for 'type':\n")
+print(unique(RCC_dataset$type))
+
+cat("\nAvailable unique values for 'dataid_type':\n")
+print(unique(RCC_dataset$dataid_type))
+
+cat("\nAvailable unique values for 'summaryDescription':\n")
+print(unique(RCC_dataset$summaryDescription))
+
+# --- Cancer & Clinical Stage Annotations ---
+cat("\nAvailable unique values for 'Cancer':\n")
+print(unique(RCC_dataset$Cancer))
+
+cat("\nAvailable unique values for 'cancer':\n")
+print(unique(RCC_dataset$cancer))
+
+cat("\nAvailable unique values for 'Tumor_stage':\n")
+print(unique(RCC_dataset$Tumor_stage))
+
+cat("\nAvailable unique values for 'stage':\n")
+print(unique(RCC_dataset$stage))
+
+cat("\nAvailable unique values for 'grade':\n")
+print(unique(RCC_dataset$grade))
+
+cat("\nAvailable unique values for 'leibovich':\n")
+print(unique(RCC_dataset$leibovich))
+
+cat("\nAvailable unique values for 'DN_status_2':\n")
+print(unique(RCC_dataset$DN_status_2))
+
+cat("\nAvailable unique values for 'B_cell_status':\n")
+print(unique(RCC_dataset$B_cell_status))
+
+# --- Scores & Cell Cycle ---
+cat("\nAvailable unique values for 'DIG.Score1':\n")
+print(unique(RCC_dataset$DIG.Score1))
+
+cat("\nAvailable unique values for 'S.Score':\n")
+print(unique(RCC_dataset$S.Score))
+
+cat("\nAvailable unique values for 'G2M.Score':\n")
+print(unique(RCC_dataset$G2M.Score))
+
+cat("\nAvailable unique values for 'Phase':\n")
+print(unique(RCC_dataset$Phase))
+
+# --- Clustering & Prediction Labels ---
+cat("\nAvailable unique values for 'seurat_clusters':\n")
+print(unique(RCC_dataset$seurat_clusters))
+
+cat("\nAvailable unique values for 'integrated_snn_res.0.5':\n")
+print(unique(RCC_dataset$integrated_snn_res.0.5))
+
+cat("\nAvailable unique values for 'predicted_labels':\n")
+print(unique(RCC_dataset$predicted_labels))
+
+cat("\nAvailable unique values for 'over_clustering':\n")
+print(unique(RCC_dataset$over_clustering))
+
+cat("\nAvailable unique values for 'majority_voting':\n")
+print(unique(RCC_dataset$majority_voting))
+# 
+# cat("\nAvailable unique values for 'conf_score':\n")
+# print(unique(RCC_dataset$conf_score))
+
+cat("\nAvailable unique values for 'labels_RCC':\n")
+print(unique(RCC_dataset$labels_RCC))
+
+```
+
+The relevnat column are :
+
+```         
+"labels_RCC"
+"predicted_labels"
+"PatientID"
+"SampleID"
+"celltype"
+"patient"
+"dataid"   
+```
+
+What are the unique values of each column?
+
+### Checks Fulldataset
+
+```{r}
+# --- Analyze the Metadata IN the inital (with VDJ)---
+# Access the desired columns directly from the metadata of RCC_dataset
+patient_values <- RCC_dataset@meta.data$patient
+labels_RCC_values <- RCC_dataset@meta.data$labels_RCC
+
+# Get the unique values from each column
+unique_patient <- unique(patient_values)
+unique_labels_RCC <- unique(labels_RCC_values)
+
+# Print the unique values to the console
+cat("Unique values in 'orig.ident' column of RCC_dataset:\n")
+print(unique_patient)
+
+cat("\nUnique values in 'labels_RCC' column of RCC_dataset:\n")
+# Corrected the variable name in the line below
+print(unique_labels_RCC)
+
+
+# --- Display Object Summary ---
+# Display a quick summary of the loaded object
+cat("\nRCC_dataset loaded with", ncol(RCC_dataset), "cells and", nrow(RCC_dataset), "features.\n")
+```
+
+### Checking the patients:
+
+Counts:
+
+```{r}
+# Make sure you have dplyr installed and loaded
+# install.packages("dplyr")
+library(dplyr)
+
+# Use the count verb on the metadata
+RCC_dataset[[]] %>%
+  count(patient)
+```
+
+### Adding Metadata V2 (samples)
+
+Now doing this on the FIle for the rest of teh analysis (With VDJ, 31000 features):
+
+```{r}
+# --- Create a new 'sample' column by renaming 'patient' values (Corrected Method) ---
+
+# 1. Get the patient data from your Seurat object
+# We convert it to a character vector to avoid potential issues with factors
+original_patient_ids <- as.character(RCC_dataset$patient)
+
+# 2. Find all unique patient IDs that start with "D36_RC"
+d36_patients_to_rename <- unique(grep("^D36_RC", original_patient_ids, value = TRUE))
+
+# 3. Create the new names for these patients ("RCC_D36_1", "RCC_D36_2", etc.)
+new_sample_names <- paste0("RCC_D36_", seq_along(d36_patients_to_rename))
+
+# 4. Create the "lookup table" or "map" to connect old names to new names
+name_map <- setNames(new_sample_names, d36_patients_to_rename)
+
+# 5. Create the new sample column
+# Start by creating a direct copy of the original patient IDs
+new_sample_column <- original_patient_ids
+
+# Now, selectively replace only the values that are in our map
+for (old_name in names(name_map)) {
+  new_name <- name_map[[old_name]]
+  new_sample_column[new_sample_column == old_name] <- new_name
+}
+
+# 6. Add this corrected column to the Seurat object's metadata
+RCC_dataset <- AddMetaData(
+  object = RCC_dataset,
+  metadata = new_sample_column,
+  col.name = "sample"
+)
+
+
+# --- Verification Steps ---
+cat("--- Verification ---\n")
+
+# Show the mapping that was created and applied
+cat("\nThe following mapping was used for renaming:\n")
+print(name_map)
+
+# Show a cross-tabulation to confirm the changes
+cat("\nComparison of original 'patient' column and new 'sample' column:\n")
+print(table(Original = RCC_dataset$patient, New = RCC_dataset$sample))
+```
+
+# Paper Gene filtering
+
+### Contaminant cells ?
+
+YEs, other genes nor belonging to B cells.
+
+```{r}
+# Define the list of genes you want to detect
+exclusion_genes <- c("CD3E", "GNLY", "CD14", "FCER1A", "FCGR3A", "PPBP", "LYZ", "CD8A")
+
+cat("--- Gene Presence and Expression Analysis ---\n")
+
+# 1. Check which of your specified genes are actually in the dataset
+# This step is crucial to prevent errors if a gene isn't found.
+genes_to_check <- exclusion_genes[exclusion_genes %in% rownames(RCC_dataset)]
+
+cat("\nGenes from your list found in the RCC_dataset:\n")
+print(genes_to_check)
+
+# 2. Extract the raw count data for the genes that were found
+# LayerData is the correct function for Seurat v5 objects.
+gene_counts <- LayerData(object = RCC_dataset, assay = "RNA", layer = "counts")[genes_to_check, , drop = FALSE]
+
+# 3. Calculate the total UMI counts for each gene across all cells
+cat("\n--- Summary (Total UMI Counts Per Gene) ---\n")
+print(rowSums(gene_counts))
+
+# 4. Count how many cells express each gene (i.e., have a count > 0)
+cat("\n--- Number of Cells Expressing Each Gene ---\n")
+print(rowSums(gene_counts > 0))
+```
+
+### Filtering Excluding genes (axing1)
+
+Only consider cells that have no expression ( 0 counts) of the exclusion genes ([*CD3E, GNLY, CD14, FCER1A, FCGR3A, LYZ, PPBP and CD8A transcripts)*]{.underline}
+
+Let's excluded them. filter your `RCC_dataset` object.This script will create a **new** Seurat object named `RCC_dataset_filtered`, which contains only the cells that have zero expression for all of the specified `exclusion_genes`.
+
+```{r}
+# Define the list of genes you want to use for filtering
+exclusion_genes <- c("CD3E", "GNLY", "CD14", "FCER1A", "FCGR3A", "PPBP", "LYZ", "CD8A")
+
+# --- Filtering a Seurat Object Based on Gene Expression ---
+
+# 1. First, identify which of the exclusion genes are actually in your dataset to avoid errors
+genes_to_check <- exclusion_genes[exclusion_genes %in% rownames(RCC_dataset)]
+
+cat("Using the following genes found in the dataset for filtering:\n")
+print(genes_to_check)
+
+# 2. Access the count matrix for these specific genes using LayerData (for Seurat v5)
+exclusion_counts <- LayerData(object = RCC_dataset, assay = "RNA", layer = "counts")[genes_to_check, , drop = FALSE]
+
+# 3. For each cell, calculate the sum of counts for all the exclusion genes
+sum_exclusion_counts_per_cell <- colSums(exclusion_counts)
+
+# 4. Identify the cell barcodes where this sum is exactly zero
+cells_to_keep <- names(sum_exclusion_counts_per_cell[sum_exclusion_counts_per_cell == 0])
+
+# 5. Subset the Seurat object to create a new object containing only the cells to keep
+RCC_dataset_filtered <- subset(RCC_dataset, cells = cells_to_keep)
+
+
+# --- Verification ---
+cat("\n--- Filtering Summary ---\n")
+cat("Original number of cells:", ncol(RCC_dataset), "\n")
+cat("Number of cells after filtering:", ncol(RCC_dataset_filtered), "\n")
+cat("Number of cells removed:", ncol(RCC_dataset) - ncol(RCC_dataset_filtered), "\n")
+```
+
+### Filtering 1 % (axing2)
+
+*cells with total transcript count in the top 1% percentile were removed, as these cells were manually inspected to express transcripts of multiple V gene families per cell, indicating possible cell clumps tagged with the same barcode.*
+
+ilter your `RCC_dataset_filtered` object, removing cells with the highest total RNA counts (the top 1%), which is a standard step to help remove potential doublets. The result will be saved to a new object, `RCC_filtered`
+
+```{r}
+# --- Filtering out Top 1% of Cells by Total UMI Count ---
+
+# This script uses 'RCC_dataset_filtered' as input.
+
+# Print the number of cells before filtering
+cat("Number of cells before filtering:", ncol(RCC_dataset_filtered), "\n")
+
+# 1. Get the total RNA counts for each cell
+total_counts <- RCC_dataset_filtered$nCount_RNA
+
+# 2. Calculate the 99th percentile to define the cutoff for the top 1%
+threshold_99th <- quantile(total_counts, probs = 0.99, na.rm = TRUE)
+cat("UMI count threshold for the top 1% of cells:", round(threshold_99th), "\n")
+
+# 3. Create the new, final object named 'RRC_filtered'
+RRC_filtered <- subset(RCC_dataset_filtered, subset = nCount_RNA <= threshold_99th)
+
+
+# --- Verification ---
+# Print the number of cells after filtering
+cat("\nNumber of cells in the final object (RRC_filtered):", ncol(RRC_filtered), "\n")
+cat("Number of cells removed in this step:", ncol(RCC_dataset_filtered) - ncol(RRC_filtered), "\n")
+```
+
+## Adding metadata
+
+#### Metadata: Mitocondrial
+
+-   **The percentage of reads that map to the mitochondrial genome**
+
+    -   Low-quality / dying cells often exhibit extensive mitochondrial contamination
+    -   We calculate mitochondrial QC metrics with the `PercentageFeatureSet()` function, which calculates the percentage of counts originating from a set of features
+    -   We use the set of all genes starting with `MT-` as a set of mitochondrial genes.
+
+-   Do we have mitocondrial genes ? Some of them no.
+
+    ```{r}
+    sum(is.na(RCC_dataset$percent.mt))
+    sum(is.na(RRC_filtered$percent.mt))
+    ```
+
+Lets introduce values for all of them:
+
+```{r mito metadata}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+RRC_filtered[["perc.mt"]] <- PercentageFeatureSet(RRC_filtered, pattern = "^MT-")
+# Show QC metrics for the first 5 cells
+head(RRC_filtered@meta.data, 5)
+```
+
+#### Metadata: Ribosomical
+
+```{r ribosomical metadata}
+# This script calculates the percentage of counts from ribosomal genes for each cell.
+
+cat("Calculating percentage of ribosomal genes for the 'RRC_filtered' object...\n")
+
+# Use PercentageFeatureSet to calculate the percentage of counts for genes matching the pattern.
+# The pattern "^RPS|^RPL" matches genes starting with RPS (small subunit) or RPL (large subunit).
+RRC_filtered[["percent.ribo"]] <- PercentageFeatureSet(RRC_filtered, pattern = "^RPS|^RPL")
+
+cat("Percentage of ribosomal genes calculated and added as 'percent.ribo'.\n")
+
+
+# --- Verification Steps ---
+
+cat("\nShowing metadata for the first 5 cells:\n")
+print(head(RRC_filtered@meta.data, 5))
+
+cat("\nChecking column names in metadata to confirm 'percent.ribo' was added:\n")
+print(colnames(RRC_filtered@meta.data))
+```
+
+#### Metadata: Ig_associated_genes
+
+which genes are present ? About 380 genes
+
+```{r Identifying Ig related genes}
+# --- Define Your Gene Lists and Patterns ---
+
+# 1. Explicit list of Ig constant genes and others
+ig_constant_genes_list <- c(
+  "IGHM", "IGHD", "IGHE", "IGHA1", "IGHA2",
+  "IGHG1", "IGHG2", "IGHG3", "IGHG4",
+  "IGKC",
+  "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7",
+  "AC233755.1"
+)
+
+# 2. Regular expression patterns
+ig_vdj_regex <- "^IG[HKL][VDJ]" # Ig V(D)J genes
+igll_regex <- "^IGLL"          # IGLL genes
+tcr_regex <- "^TR[ABGD][CV]"   # TCR V/C genes
+
+# --- Find the Genes in Your RRC_filtered Object ---
+
+# Get all gene names from the object for efficient searching
+all_genes <- rownames(RRC_filtered)
+
+# Find genes from the explicit list
+found_constant_genes <- ig_constant_genes_list[ig_constant_genes_list %in% all_genes]
+
+# Find genes using regular expression patterns
+found_ig_vdj_genes <- grep(ig_vdj_regex, all_genes, value = TRUE)
+found_igll_genes <- grep(igll_regex, all_genes, value = TRUE)
+found_tcr_genes <- grep(tcr_regex, all_genes, value = TRUE)
+
+
+# --- Print the Results with Counts ---
+cat("--- Genes Found in RRC_filtered ---\n\n")
+
+# Use length() to count the number of genes in each vector
+cat("✅ 1. Ig Constant & Specific Genes Found (", length(found_constant_genes), " total):\n", sep="")
+print(found_constant_genes)
+cat("\n-------------------------------------\n")
+
+cat("✅ 2. Ig V(D)J Genes Found (", length(found_ig_vdj_genes), " total):\n", sep="")
+print(found_ig_vdj_genes)
+cat("\n-------------------------------------\n")
+
+cat("✅ 3. IGLL Genes Found (", length(found_igll_genes), " total):\n", sep="")
+print(found_igll_genes)
+cat("\n-------------------------------------\n")
+
+cat("✅ 4. TCR Genes Found (", length(found_tcr_genes), " total):\n", sep="")
+print(found_tcr_genes)
+```
+
+Note: With the other file, RCC_label_vS.rds (file for the UMAP representation, and from teh paper constant genes present, but even so, no many of them, only some Ig Constant & Specific Genes Found (7 or 8 in total)
+
+Checking Metadata
+
+```{r}
+colnames(RRC_filtered@meta.data)
+```
+
+# `QC. Filtering the raw (non-normalized data)`
+
+#### Option 1 (RRC_dataset_qc1).
+
+the filtered RRC_filtered is a Seurat object , need to be filtered to remove genes detected in fewer than X cells and cells with fewer than y detected genes. (example X=3; y=200). Now filter ( paramater introduce at the start of the script:
+
+```{r}
+# --- Define Filtering Parameters ---
+
+cat("--- Applying Cell and Gene Filters ---\n")
+cat("Keeping genes detected in at least", min_cells_threshold, "cells.\n")
+cat("Keeping cells with at least", min_features_threshold, "genes.\n\n")
+
+
+# --- Original Object Dimensions ---
+cat("Dimensions before filtering (RRC_filtered):\n")
+cat("  Number of genes:", nrow(RRC_filtered), "\n")
+cat("  Number of cells:", ncol(RRC_filtered), "\n\n")
+
+
+# 1. Identify which genes to keep
+# This section identifies genes that are expressed in at least `min_cells_threshold` cells.
+counts_matrix <- LayerData(object = RRC_filtered, assay = "RNA", layer = "counts")
+num_cells_per_gene <- rowSums(counts_matrix > 0)
+genes_to_keep <- names(num_cells_per_gene[num_cells_per_gene >= min_cells_threshold])
+
+
+# 2. Filter the Seurat object and create the new object
+# The 'subset()' function efficiently filters both cells and genes in one step.
+RRC_dataset_qc1 <- subset(
+  RRC_filtered,
+  features = genes_to_keep,                         # Applies the gene filter
+  subset = nFeature_RNA >= min_features_threshold  # Applies the cell filter
+)
+
+
+# --- New Object Dimensions ---
+cat("Dimensions after filtering (RRC_dataset_qc1):\n")
+cat("  Number of genes:", nrow(RRC_dataset_qc1), "\n")
+cat("  Number of cells:", ncol(RRC_dataset_qc1), "\n")
+```
+
+No cells were filtered in RCC_label_v2.rds (contrary wtih RCC_label_vS.rds) as the features used are almost double (from 18000 to 30000).
+
+##### Checking RRC_dataset_qc1 (Seurat Object)
+
+```{r and metadata included}
+# RRC_dataset_qc1
+# head(RRC_dataset_qc1$nFeature_RNA)
+# head(RRC_dataset_qc1[['nFeature_RNA']])
+# RRC_dataset_qc1@meta.data
+# print(colnames(RRC_dataset_qc1@meta.data))
+```
+
+### General QC metrics
+
+Distribution from metadata
+
+```{r qc metadata}
+# Assuming RRC_dataset_qc1 is your Seurat object with the full list of metadata columns.
+
+# --- Visualize ALL relevant QC metrics as violin plots ---
+cat("Visualizing all relevant QC metrics as violin plots...\n")
+
+# CORRECTED: Removed the trailing comma after "percent.ribo"
+VlnPlot(
+  RRC_dataset_qc1,
+  features = c(
+    "nFeature_RNA",
+    "nCount_RNA",
+    "perc.mt",
+    "percent.ribo" 
+  ),
+  ncol = 4
+)
+# --- FeatureScatter plots ---
+# Visualize relationships between metrics
+cat("\nVisualizing relationships between QC metrics using FeatureScatter...\n")
+
+# Standard QC plots
+# CORRECTED: Changed "%.mt" to "percent.mt"
+plot1 <- FeatureScatter(RRC_dataset_qc1, feature1 = "nCount_RNA", feature2 = "perc.mt")
+
+plot2 <- FeatureScatter(RRC_dataset_qc1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+# Plots involving your new metrics
+plot3 <- FeatureScatter(RRC_dataset_qc1, feature1 = "nCount_RNA", feature2 = "percent.ribo")
+
+# Relationships between percentages
+# CORRECTED: Changed "%.mt" to "percent.mt"
+plot4 <- FeatureScatter(RRC_dataset_qc1, feature1 = "perc.mt", feature2 = "percent.ribo")
+
+# Combine and display the plots using the patchwork package
+cat("\nCombining and displaying FeatureScatter plots...\n")
+combined_scatter_plots <- plot1 + plot2 + plot3 + plot4
+print(combined_scatter_plots)
+```
+
+I can see that mitocondrial has been capped at 10 %.
+
+plot '%.mt' vs 'percent.ribo'. Limit about 12%
+
+```{r}
+# --- Create a Scatter Plot of Ribosomal vs. Mitochondrial Gene Percentage ---
+
+# 1. Create a data frame for ggplot2 directly from the Seurat object's metadata.
+# This is a more direct way than extracting vectors first.
+plot_data_df <- RRC_dataset_qc1@meta.data[, c("percent.ribo", "perc.mt")]
+
+# 2. Create the scatter plot using ggplot2
+ggplot_ribo_mt_scatter <- ggplot(plot_data_df, aes(x = percent.ribo, y = perc.mt)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  theme_classic() +
+  xlab("Ribosomal Gene Percentage") +
+  ylab("Mitochondrial Gene Percentage") +
+  ggtitle("Ribosomal vs. Mitochondrial Content per Cell") +
+
+  # --- CHANGE: Added a vertical line on the x-axis at 20% ---
+  geom_vline(xintercept = 10, color = "red", linetype = "dashed")
+
+# 3. Print the plot
+print(ggplot_ribo_mt_scatter)
+
+
+# --- Optional: Example of how to color the points by another metadata column (e.g., 'sample') ---
+
+# # 1. Create a data frame that includes the column you want to color by
+# plot_data_colored_df <- RRC_dataset_qc1@meta.data[, c("percent.ribo", "perc.mt", "sample")]
+#
+# # 2. Create the plot, adding the 'color' aesthetic
+# ggplot_colored <- ggplot(plot_data_colored_df, aes(x = percent.ribo, y = perc.mt, color = sample)) +
+#   geom_point(size = 0.5, alpha = 0.7) +
+#   theme_classic() +
+#   xlab("Ribosomal Gene Percentage") +
+#   ylab("Mitochondrial Gene Percentage") +
+#   ggtitle("Ribosomal vs. Mitochondrial Content, Colored by Sample")
+#
+# # 3. Print the colored plot
+# print(ggplot_colored)
+
+# Make sure ggplot2 is loaded to add layers
+library(ggplot2)
+
+# Create the violin plot for the 'percent.ribo' feature
+VlnPlot(RRC_dataset_qc1, features = "percent.ribo") +
+  
+  # Add horizontal lines to visualize potential cutoffs
+  geom_hline(yintercept = 12, color = "orange", linetype = "dashed", linewidth = 1) +
+  geom_hline(yintercept = 20, color = "red", linetype = "dashed", linewidth = 1) +
+  
+  # Add a title for clarity
+  labs(title = "Distribution of Ribosomal Gene Percentage",
+       subtitle = "Thresholds shown at 12% (orange) and 20% (red)")
+```
+
+-   Cells in the lower right corner (high `percent.ribo`, low `percent.mt`) represent what are typically considered higher-quality, metabolically active cells.
+-   Cells towards the upper left (lower `percent.ribo`, higher `percent.mt`) are often considered lower-quality or stressed cells, possibly undergoing apoptosis
+
+### QC2. FIltering Out cells by Mitocondria,Ribo and uniqueFeatures
+
+In the example below, we visualize QC metrics, and use these to filter cells.
+
+-   We filter cells that have unique feature counts over 2,500 or less than 200
+-   We filter cells that have \>~~5~~ 10 % mitochondrial counts and equal or more than 12 % percent ribo.
+
+```{r}
+# --- Define Final Filtering Parameters ---
+
+
+cat("--- Applying Final QC Filters ---\n")
+cat("Keeping cells with features between", min_features, "and", max_features, "\n")
+cat("Keeping cells with ribosomal content >", min_ribo_percent, "%\n\n")
+
+# --- Dimensions Before Filtering ---
+cat("Number of cells before filtering (RRC_dataset_qc1):", ncol(RRC_dataset_qc1), "\n\n")
+
+# --- Apply subsetting with multiple conditions ---
+# The condition for percent.ribo has been changed from <= to >
+RRC_dataset_filtered_final <- subset(
+  RRC_dataset_qc1,
+  subset = nFeature_RNA > min_features &
+           nFeature_RNA < max_features &
+           percent.ribo > min_ribo_percent
+)
+
+# --- Dimensions After Filtering ---
+cat("Number of cells after final filtering (RRC_dataset_filtered_final):\n")
+cat("  Number of cells:", ncol(RRC_dataset_filtered_final), "\n")
+cat("  Number of cells removed:", ncol(RRC_dataset_qc1) - ncol(RRC_dataset_filtered_final), "\n")
+```
+
+## Normalizing the data
+
+[*Gene counts were log-normalized*]{.underline}
+
+After removing unwanted cells from the dataset, the next step is to normalize the data. The primary goal of normalization in single-cell RNA-seq is to **account for differences in sequencing depth (or library size) between cells.** For each cell, the count of every gene (expression) is divided by the total number of unique molecular identifiers (UMIs) or read counts detected. This converts raw counts into proportions or frequencies.
+
+We employed a [global-scaling normalization method "LogNormalize"]{.underline} that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. Log-transformation reduces this mean-variance relationship and mades data more normally distributed. In Seurat v5, Normalized values are stored in `HB6.a_qc1[["RNA"]]$data`, indicating the 'data' layer within the 'RNA' assay.
+
+```{r normalize}
+# After creating RRC_dataset_filtered_final
+
+RRC_dataset_filtered_final <- NormalizeData(RRC_dataset_filtered_final)
+```
+
+## Find variable Features: Selection of highly variable features
+
+We next calculate a subset of features that exhibit high cell-to-cell variation in the dataset (i.e, they are highly expressed in some cells, and lowly expressed in others). We and [others](https://www.nature.com/articles/nmeth.2645) have found that focusing on these genes in downstream analysis helps to highlight biological signal in single-cell datasets.
+
+Our procedure in Seurat is described in detail [here](https://doi.org/10.1016/j.cell.2019.05.031), and improves on previous versions by directly modeling the mean-variance relationship inherent in single-cell data, and is implemented in the `FindVariableFeatures()` function. By default, we return **2,000 features per datase**t. These will be used in downstream analysis, like PCA.
+
+*The originanl author used: Each dataset was normalized to 10,000 counts per cell and log transformed. 8,000 highly variable genes were identified using the sc.pp.highly_variable_genes function (Seurat v3 method) implemented in scanpy, accounting for batch effects by specifying the dataset as the batch key.*
+
+###### Before pruning Ig and TCR related genes
+
+```{r}
+RRC_dataset_filtered_final <- FindVariableFeatures(RRC_dataset_filtered_final, selection.method = 'vst', nfeatures = 2000)
+
+# Identify the 50 most highly variable genes
+top80 <- head(VariableFeatures(RRC_dataset_filtered_final), 80)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(RRC_dataset_filtered_final)
+plot2 <- LabelPoints(plot = plot1, points = top80, repel = TRUE, max.overlaps = Inf)
+plot2
+
+```
+
+as no many Ig related genes, we can see that other genes apperead more varaible, contrary to observed in PBMCs.
+
+Which are the most 100 variable genes? Get the list of all variable features identified.:
+
+```{r}
+# This list is automatically ordered from most variable to least variable.
+all_variable_genes <- VariableFeatures(RRC_dataset_filtered_final)
+
+# Select the first 200 genes from the ordered list using head()
+top_100_variable_genes <- head(all_variable_genes, 100)
+
+# Print the list of the top 200 variable genes
+cat("Top", 100, "most variable genes:\n")
+print(top_100_variable_genes)
+```
+
+# FILTERING IG and TCR genes (RRC_dataset_filtered_final)
+
+Incluiding all the rest selected : *all Ig V, D, J genes (extracted using the regular expression [regex] “IG[HKL][VDJ]”), Ig constant genes (IGHM, IGHD, IGHE, IGHA[1-2], IGHG[1-4], IGKC, IGLC[1-7], and AC233755.1 [which encodes IGHV4-38- 2]), IGLL genes, T-cell receptor genes (regex “TR[ABGD][CV]”) (100+ genes were taken out of analysis). First a made a copy of the unfiltered:*
+
+```{r}
+# RRC_dataset_filtered_final_original has original variable features from FindVariableFeatures()
+RRC_dataset_filtered_final_original <- RRC_dataset_filtered_final
+cat("Created RRC_dataset_filtered_final_original, a copy of RRC_dataset_filtered_final before custom variable feature filtering.\n")
+cat("Number of variable features in RRC_dataset_filtered_final_original:", length(VariableFeatures(RRC_dataset_filtered_final_original)), "\n")
+```
+
+Now filtering:
+
+```{r}
+# --- Define Gene Sets ---
+
+# Explicit list of Ig constant genes and other specific genes
+ig_constant_genes_list <- c(
+  "IGHM", "IGHD", "IGHE", "IGHA1", "IGHA2",
+  "IGHG1", "IGHG2", "IGHG3", "IGHG4",
+  "IGKC",
+  "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7",
+  "AC233755.1"
+)
+ig_constant_genes_set <- as.character(unique(ig_constant_genes_list))
+
+# Regular expression patterns for different gene categories
+ig_vdj_regex <- "^IG[HKL][VDJ]" # Ig V(D)J genes
+igll_regex <- "^IGLL"          # IGLL genes
+tcr_regex <- "^TR[ABGD][CV]"   # TCR V/C genes
+
+
+# >>>>>> SET YOUR CLUSTERING SCENARIO HERE <<<<<<
+# We'll define a scenario to exclude all Ig and TCR genes to see how clustering
+# ALready done in section QC Parameters varaible ( ath the beggining of the script)
+
+
+# --- Function to Identify Genes for Removal ---
+# This function identifies which variable genes to remove based on the chosen scenario.
+filter_variable_features_by_gene_sets <- function(
+  seurat_object,
+  exclude_sets = c(),
+  ig_constant_genes_set,
+  ig_vdj_regex,
+  igll_regex,
+  tcr_regex
+) {
+  cat("\n--- Identifying Genes for Removal from Variable Features ---\n")
+  current_variable_genes <- VariableFeatures(seurat_object)
+  genes_to_remove <- character(0)
+
+  if ("ig_vdj" %in% exclude_sets) {
+    vdj_matches <- grep(ig_vdj_regex, current_variable_genes, value = TRUE)
+    genes_to_remove <- c(genes_to_remove, vdj_matches)
+  }
+  if ("ig_constant" %in% exclude_sets) {
+    constant_matches <- intersect(current_variable_genes, ig_constant_genes_set)
+    genes_to_remove <- c(genes_to_remove, constant_matches)
+  }
+  if ("igll" %in% exclude_sets) {
+    igll_matches <- grep(igll_regex, current_variable_genes, value = TRUE)
+    genes_to_remove <- c(genes_to_remove, igll_matches)
+  }
+  if ("tcr" %in% exclude_sets) {
+    tcr_matches <- grep(tcr_regex, current_variable_genes, value = TRUE)
+    genes_to_remove <- c(genes_to_remove, tcr_matches)
+  }
+  
+  genes_to_remove <- unique(genes_to_remove)
+  cat("Total unique genes identified for removal:", length(genes_to_remove), "\n")
+  return(genes_to_remove)
+}
+
+
+# --- Create a New Object and Filter Its Variable Features ---
+
+cat(paste0("\n### Running Analysis Scenario: ", scenario_name, " ###\n"))
+
+# It's good practice to work on a copy to preserve the original object.
+RRC_pruned_vf <- RRC_dataset_filtered_final
+
+# 1. Identify the genes to remove using the function
+genes_to_remove <- filter_variable_features_by_gene_sets(
+  seurat_object = RRC_pruned_vf,
+  exclude_sets = exclude_sets_for_scenario,
+  ig_constant_genes_set = ig_constant_genes_set,
+  ig_vdj_regex = ig_vdj_regex,
+  igll_regex = igll_regex,
+  tcr_regex = tcr_regex
+)
+
+# 2. Update the VariableFeatures in the NEW Seurat object
+# We use setdiff() to get the list of genes to keep.
+VariableFeatures(RRC_pruned_vf) <- setdiff(VariableFeatures(RRC_pruned_vf), genes_to_remove)
+
+
+# --- Verification ---
+cat("\nVariable features have been pruned in the new 'RRC_pruned_vf' object.\n")
+cat("Original number of variable features:", length(VariableFeatures(RRC_pruned_vf)), "\n")
+cat("New number of variable features:", length(VariableFeatures(RRC_pruned_vf)), "\n")
+
+```
+
+###### Before pruning Ig and TCR related genes
+
+```{r}
+# --- Visualize the PRUNED Variable Features ---
+# Note: This assumes the 'RRC_pruned_vf' object already exists.
+
+# Identify the top 40 most highly variable genes from the new PRUNED list
+top40_pruned <- head(VariableFeatures(RRC_pruned_vf), 40)
+
+# Plot the new variable features
+plot1_pruned <- VariableFeaturePlot(RRC_pruned_vf)
+plot2_pruned <- LabelPoints(plot = plot1_pruned, points = top40_pruned, repel = TRUE, max.overlaps = Inf)
+
+# Display the plot
+plot2_pruned
+```
+
+After filtering, whic are the most varaible genes:
+
+```{r}
+# This list is automatically ordered from most variable to least variable.
+all_variable_genes <- VariableFeatures(RRC_pruned_vf)
+
+# Select the first 200 genes from the ordered list using head()
+top_100_variable_genes <- head(all_variable_genes, 100)
+
+# Print the list of the top 200 variable genes
+cat("Top", 100, "most variable genes:\n")
+print(top_100_variable_genes)
+```
+
+# Data Scaling
+
+## General Scaling
+
+Next, we apply a linear transformation ('scaling') that is a standard pre-processing step prior to dimensional reduction techniques like PCA. The `ScaleData()` function:
+
+-   Shifts the expression of each gene, so that the mean expression across cells is 0
+-   Scales the expression of each gene, so that the variance across cells is 1
+    -   This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+-   The results of this are stored in `seurat_object[["RNA"]]$scale.data`
+-   By default, only variable features are scaled.
+-   You can specify the `features` argument to scale additional features
+-   `{# {r regress, results='hide'} # all.genes <- rownames(seurat_object) # HB6.a_qc1 <- ScaleData(seurat_object, features = all.genes)`
+
+## **Removing unwanted sources of variation through scaling (all genes)**
+
+In Seurat, we also use the `ScaleData()` function to remove unwanted sources of variation from a single-cell dataset. For example, we could 'regress out' heterogeneity associated with (for example) [cell cycle stage](https://satijalab.org/seurat/articles/cell_cycle_vignette), or mitochondrial contamination i.e.:
+
+Scaling all genes can be computationally intensive for large datasets.Often, you only need to scale the variable features used for PCA. But for HB6, `ScaleData()` **defaults to using the genes stored in `VariableFeatures(object).`**
+
+```{r regress, results='hide'}
+# Assuming RRC_dataset_filtered_final is your Seurat object after normalization,
+# variable feature identification, and calculation of the %/count metrics.
+
+# Define the variables you want to regress out at section: Experimental Parameters Been tested
+
+# Run ScaleData, specifying the variables to regress
+RRC_scaled <- ScaleData(object = RRC_pruned_vf)
+# Run ScaleData, specifying the variables to regress
+# RRC_scaled <- ScaleData(object = RRC_dataset_filtered_final, vars.to.regress = variables_to_regress)
+# You can also specify 'features' here if you only want to scale/regress a subset of genes (e.g., VariableFeatures(HB6.a_qc1))
+# Example scaling only variable features:
+# features = VariableFeatures(HB6.a_qc1)
+
+# cat("ScaleData complete. Variation from", paste(variables_to_regress, collapse = ", "), "has been regressed out.\n")
+```
+
+*Note: I didn't use `ScaleData()` function to remove unwanted sources of variation from a single-cell dataset. For example, we could 'regress out' heterogeneity associated with (for example) [cell cycle stage](https://satijalab.org/seurat/articles/cell_cycle_vignette), or mitochondrial contamination i.e.:*
+
+# CLUSTERING
+
+## Perform linear dimensional reduction
+
+Next we perform PCA on the scaled data. By default, only the previously determined variable features are used as input, but can be defined using `features` argument if you wish to choose a different subset (if you do want to use a custom subset of features, make sure you pass these to `ScaleData` first).
+
+For the first principal components, Seurat outputs a list of genes with the most positive and negative loadings, representing modules of genes that exhibit either correlation (or anti-correlation) across single-cells in the dataset.
+
+```{r pca,results='hide'}
+RRC_scaled<- RunPCA(RRC_scaled, features = VariableFeatures(object = RRC_scaled))
+```
+
+Seurat provides several useful ways of visualizing both cells and features that define the PCA, including `VizDimReduction()`, `DimPlot()`, and `DimHeatmap()`
+
+```{r pca_viz, fig.height=8, fig.width=10, message=TRUE}
+# Examine and visualize PCA results a few different ways
+#print(HB6.a_qc1[['pca']], dims = 1:5, nfeatures = 5)
+VizDimLoadings(RRC_scaled, dims = 1:2, reduction = 'pca')
+
+# Color the PCA plot by the 'Population' metadata column
+DimPlot(RRC_scaled, reduction = 'pca', group.by = 'sample')
+```
+
+## Determine the 'dimensionality' of the dataset
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a 'metafeature' that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset. However, how many components should we choose to include? 10? 20? 100?
+
+An alternative heuristic method generates an 'Elbow plot': a ranking of principle components based on the percentage of variance explained by each one (`ElbowPlot()` function). In this example, we can observe an 'elbow' around PC9-10, suggesting that the majority of true signal is captured in the first 10 PCs.
+
+```{r elbow_plot, fig.height=6, fig.width=10}
+ElbowPlot(RRC_scaled) + 
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "red")
+```
+
+*Principal Component Analysis (PCA) was then performed on this pruned gene list. Surveying the first 20 principal components, the proportion of variance explained plateaued at \~ 1.5% from the 18th PC onwards. I choose 18th to get less than 1.5%.*
+
+## Harmony
+
+batch correction method? That might be causing the funny clustering. You could look into Harmony and specifying the "patient" and "dataid" as the batch effect that you  would want to remove. [[https://portals.broadinstitute.org/harmony/articles/quickstart.html]{.underline}](https://linkprotect.cudasvc.com/url?a=https%3a%2f%2fportals.broadinstitute.org%2fharmony%2farticles%2fquickstart.html&c=E,1,PoYN-k_DpIfRqI5yaJjDuAo0tBhqzdbnrxvT1NBDf5o7PpORK1Eoo7hmx5XV60TIuraLROYcbG7ntVpoYhzjifQaNiih2FbDwnuCMGTtkhIShClT0Pc,&typo=1 "https://linkprotect.cudasvc.com/url?a=https%3a%2f%2fportals.broadinstitute.org%2fharmony%2farticles%2fquickstart.html&c=E,1,PoYN-k_DpIfRqI5yaJjDuAo0tBhqzdbnrxvT1NBDf5o7PpORK1Eoo7hmx5XV60TIuraLROYcbG7ntVpoYhzjifQaNiih2FbDwnuCMGTtkhIShClT0Pc,&typo=1").
+
+The key is to run it *after* PCA but *before* you run UMAP and FindNeighbors/FindClusters.
+
+```{r}
+# 0. Install Harmony if you haven't already
+# install.packages("harmony")
+library(harmony)
+
+# Define the variables to correct for
+batch_variables <- c("sample", "dataid")
+cat("Running Harmony to correct for:", paste(batch_variables, collapse = " and "), "\n")
+
+
+# 1. Run Harmony on the PCA reduction
+# CORRECTED: Simplified the call to remove ambiguous arguments
+RRC_harmony <- RunHarmony(
+  object = RRC_scaled,
+  group.by.vars = batch_variables,
+  project.dim = 18 # You can adjust the number of PCs to use
+)
+
+
+# --- Downstream steps would follow, using reduction = "harmony" ---
+# e.g., RRC_harmony <- RunUMAP(RRC_harmony, reduction = "harmony", dims = 1:18)
+```
+
+## Harmony/KNN Clustering of the cells/ Run non-linear dimensional reduction (UMAP
+
+Seurat applies a graph-based clustering approach, building upon initial strategies in ([Macosko *et al*](http://www.cell.com/abstract/S0092-8674(15)00549-8)). Importantly, the *distance metric* which drives the clustering analysis (based on previously identified PCs) remains the same. However, our approach to partitioning the cellular distance matrix into clusters has dramatically improved. Our approach was heavily inspired by recent manuscripts which applied graph-based clustering approaches to scRNA-seq data [[SNN-Cliq, Xu and Su, Bioinformatics, 2015]](http://bioinformatics.oxfordjournals.org/content/early/2015/02/10/bioinformatics.btv088.abstract) and CyTOF data [[PhenoGraph, Levine *et al*., Cell, 2015]](http://www.ncbi.nlm.nih.gov/pubmed/26095251). Briefly, these methods embed cells in a graph structure - for example a K-nearest neighbor (KNN) graph, with edges drawn between cells with similar feature expression patterns, and then attempt to partition this graph into highly interconnected 'quasi-cliques' or 'communities'.
+
+As in PhenoGraph, we first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). This step is performed using the `FindNeighbors()` function, and takes as input the previously defined dimensionality of the dataset (first 18 PCs).
+
+To cluster the cells, we next apply modularity optimization techniques such as the Louvain algorithm (default) or SLM [[SLM, Blondel *et al*., Journal of Statistical Mechanics]](http://dx.doi.org/10.1088/1742-5468/2008/10/P10008), to iteratively group cells together, with the goal of optimizing the standard modularity function. The `FindClusters()` function implements this procedure, and contains a resolution parameter that sets the 'granularity' of the downstream clustering, with increased values leading to a greater number of clusters. We find that setting this parameter between 0.4-1.2 typically returns good results for single-cell datasets of around 3K cells. Optimal resolution often increases for larger datasets. The clusters can be found using the `Idents()` function.
+
+T*o define cell clusters, a shared nearest neighbor (SNN) graph was constructed using Seurat:: FindNeighbors based on the first 14 PCs, and cell clusters were defined on the SNN graph with Seurat::FindClusters (resolution parameter = 1). Clusters were named according to manual inspection for their composition in terms of the original FACSdefined populations. Differential expression was examined using the Wilcoxon rank-sum test provided in Seurat::FindMarkers. Analysis for the additional samples followed the same procedure, retaining principal components that explained at least 1.5% of the variance.*
+
+```{r clustering}
+# 2. Run UMAP on the new, Harmony-corrected dimensions
+# Make sure to specify reduction = "harmony"
+RRC_harmony <- RunUMAP(RRC_harmony, reduction = "harmony", dims = 1:dimen)
+
+# 3. Find Neighbors and Clusters on the Harmony-corrected dimensions
+RRC_harmony <- FindNeighbors(RRC_harmony, reduction = "harmony", dims = 1:dimen)
+RRC_harmony <- FindClusters(RRC_harmony, resolution = resol)
+```
+
+You're using the **Louvain** algorithm.
+
+By default, the `FindClusters` function in Seurat uses the original Louvain algorithm (`algorithm = 1`) to perform the clustering.
+
+## Clustering representation
+
+sa
+
+```{r}
+# --- Visualize the Corrected Results ---
+cat("Visualizing Harmony-corrected UMAPs...\n")
+
+# Plot colored by sample to see if the batches are better mixed
+plot_sample <- DimPlot(RRC_harmony, reduction = "umap", group.by = "sample", label = TRUE, repel = TRUE)
+
+# Plot colored by cell type to ensure biological structure is preserved
+plot_celltype <- DimPlot(RRC_harmony, reduction = "umap", group.by = "labels_RCC", label = TRUE, repel = TRUE)
+
+# View the plots side-by-side to compare
+print(plot_sample + plot_celltype)
+```
+
+More in details:
+
+```{r}
+# --- Comprehensive Visualization of Harmony-Corrected Results ---
+
+cat("--- Visualizing Harmony-corrected UMAPs ---\n")
+
+# 1. Default UMAP colored by the new Harmony-based clusters
+cat("\nPlot 1: UMAP colored by new clusters\n")
+p1 <- DimPlot(RRC_harmony, reduction = 'umap', label = TRUE, repel = TRUE) +
+  ggtitle("Clusters after Harmony Correction")
+print(p1)
+
+# 2. UMAP colored by biological cell type labels
+cat("\nPlot 2: UMAP colored by biological labels ('labels_RCC')\n")
+p2 <- DimPlot(RRC_harmony, reduction = "umap", group.by = "labels_RCC", label = TRUE, repel = TRUE) +
+  ggtitle("Cell Types after Harmony Correction")
+print(p2)
+
+# 3. UMAP colored by sample to check for batch mixing
+cat("\nPlot 3: UMAP colored by sample\n")
+p3 <- DimPlot(RRC_harmony, reduction = "umap", group.by = "sample", label = TRUE, repel = TRUE) +
+  ggtitle("Samples after Harmony Correction")
+print(p3)
+
+# 4. UMAP split by cluster, showing sample contribution to each
+cat("\nPlot 4: UMAP split by cluster, colored by sample\n")
+p4 <- DimPlot(RRC_harmony, reduction = "umap", group.by = "sample", split.by = "seurat_clusters") +
+  ggtitle("Sample Contribution per Cluster")
+print(p4)
+
+# 5. UMAP split by cluster, showing biological label composition of each
+cat("\nPlot 5: UMAP split by cluster, colored by biological labels ('labels_RCC')\n")
+p5 <- DimPlot(RRC_harmony, reduction = "umap", group.by = "labels_RCC", split.by = "seurat_clusters") +
+  ggtitle("Cell Type Composition per Cluster")
+print(p5)
+```
+
+Without Harmony:
+
+```{r}
+RRC_UMAP <- RunUMAP(RRC_scaled, dims = 1:dimen)
+# check the unique identities
+levels(Idents(RRC_UMAP))
+
+# To verify the change, you can plot the UMAP again with the new labels
+DimPlot(RRC_UMAP, reduction = 'umap', label = TRUE)
+DimPlot(object = RRC_UMAP, reduction = "umap", group.by = "labels_RCC", label = TRUE, repel = TRUE)
+# Assuming your filtered Seurat object with UMAP calculated is named 'HB6.a_qc1'
+# You can also add labels for the original sample names if you like (though often less clear than cluster labels)
+DimPlot(object = RRC_UMAP, reduction = "umap", group.by = "sample", label = TRUE, repel = TRUE)
+
+# To also show the standard cluster labels alongside the original sample coloring,
+# you could use the 'split.by' argument or create separate plots.
+# Example: Plot UMAP colored by original identity AND split by cluster (if clustering is done)
+DimPlot(object = RRC_UMAP, reduction = "umap", group.by = "sample", split.by = "seurat_clusters")
+
+DimPlot(object = RRC_UMAP, reduction = "umap", group.by = "labels_RCC", split.by = "seurat_clusters")
+
+```
+
+How many cells we have:
+
+```{r}
+# Make sure you have dplyr installed and loaded
+# install.packages("dplyr")
+library(dplyr)
+
+# Use the count verb on the metadata
+RRC_UMAP [[]] %>%
+  count(patient)
+```
+
+Take
+
+### Puritty
+
+\## 1. Adapted Plotting Function
+
+```{r}
+# Load necessary libraries if you haven't already
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+generate_composition_plot_per_sample <- function(
+    base_seurat_object, 
+    sample_id_to_plot,
+    cluster_col = "seurat_clusters", # The column with numbered clusters
+    phenotype_col = "labels_RCC"     # Your phenotype column
+) {
+  
+  cat(paste0("\n--- Generating Plot for Sample: ", sample_id_to_plot, " ---\n"))
+  
+  # Subset the object to get only the specified sample
+  sample_subset_object <- subset(base_seurat_object, subset = sample == sample_id_to_plot)
+  
+  # Create a frequency table of clusters vs. phenotypes (labels_RCC)
+  phenotype_counts <- table(
+    sample_subset_object[[cluster_col, drop = TRUE]], 
+    sample_subset_object[[phenotype_col, drop = TRUE]]
+  )
+  
+  # Convert counts to proportions within each cluster
+  phenotype_prop <- prop.table(phenotype_counts, margin = 1)
+  phenotype_df <- as.data.frame(phenotype_prop, stringsAsFactors = FALSE)
+  colnames(phenotype_df) <- c("Cluster", "Phenotype", "Proportion")
+  
+  # --- Logic to order clusters by purity ---
+  
+  # Find the most prevalent phenotype in each cluster
+  most_prevalent_phenotype <- apply(phenotype_counts, 1, function(x) names(which.max(x)))
+  
+  # Calculate the "purity" of each cluster
+  purity_per_cluster <- sapply(rownames(phenotype_prop), function(cl) max(phenotype_prop[cl, ], na.rm = TRUE))
+  
+  # Get cluster names ordered by decreasing purity
+  ordered_cluster_levels <- names(sort(purity_per_cluster, decreasing = TRUE, na.last = TRUE))
+  
+  # Apply the new ordering to the data frame for plotting
+  phenotype_df$Cluster <- factor(phenotype_df$Cluster, levels = ordered_cluster_levels)
+  
+  # Create the new x-axis labels: "Cluster_ID (Most_Prevalent_Phenotype)"
+  new_x_axis_labels <- paste0(
+    ordered_cluster_levels,
+    " (",
+    most_prevalent_phenotype[ordered_cluster_levels],
+    ")"
+  )
+  
+  # --- Plotting with ggplot2 ---
+  
+  plot_title <- paste("Cluster Composition by Phenotype for Sample:", sample_id_to_plot)
+  
+  plot_composition <- ggplot(phenotype_df, aes(x = Cluster, y = Proportion, fill = Phenotype)) +
+    geom_bar(stat = "identity", color = "black", linewidth = 0.2, width = 0.9) +
+    scale_fill_viridis_d(option = "D", name = "Phenotype (labels_RCC)") +
+    scale_x_discrete(labels = new_x_axis_labels) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+      title = plot_title,
+      subtitle = paste("Seurat Object: RRC_harmony"),
+      x = "Cluster (Most Prevalent Phenotype) - Ordered by Purity",
+      y = "Proportion of Cells within Cluster"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5, margin = margin(b = 10)),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+      axis.title = element_text(size = 11),
+      legend.position = "right",
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+  
+  print(plot_composition)
+  return(plot_composition)
+}
+```
+
+\## 2. Calling the Function for Your Data
+
+```{r}
+# Get a list of all unique sample IDs from your object
+samples_to_plot <- unique(RRC_harmony$sample)
+composition_plots <- list() # Optional: store the generated plots in a list
+
+# Loop through each sample ID and call the function to create a plot
+for (sample_id in samples_to_plot) {
+  
+  # Check if the sample exists in the object
+  if (sample_id %in% unique(RRC_harmony$sample)) {
+    
+    # Call the adapted function
+    composition_plots[[sample_id]] <- generate_composition_plot_per_sample(
+      base_seurat_object = RRC_harmony,
+      sample_id_to_plot = sample_id
+    )
+    
+  } else {
+    cat("\nSample ID", sample_id, "not found. Skipping.\n")
+  }
+}
+```
+
+Group Clusters by Prevalent Phenotype
+
+```{r}
+# Load necessary libraries
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+# --- 1. Prepare the Data for All Samples at Once ---
+
+cat("--- Preparing data for plotting... ---\n")
+
+# This dplyr pipeline calculates the composition and finds the prevalent phenotype for every cluster
+prepared_data <- RRC_harmony@meta.data %>%
+  # Group by each unique combination of sample and cluster
+  group_by(sample, seurat_clusters) %>%
+  # Calculate the proportion of each labels_RCC within that group
+  count(labels_RCC) %>%
+  mutate(Proportion = n / sum(n)) %>%
+  # Find the most prevalent (dominant) labels_RCC for the group
+  mutate(Prevalent_Phenotype = labels_RCC[which.max(n)]) %>%
+  ungroup()
+
+cat("--- Data preparation complete. ---\n")
+
+
+# --- 2. Loop Through Each Prevalent Phenotype to Create Plots ---
+
+# Get a unique list of all dominant phenotypes
+phenotypes_to_plot <- unique(prepared_data$Prevalent_Phenotype)
+composition_plots_by_phenotype <- list()
+
+cat("--- Generating plots for each prevalent phenotype... ---\n")
+
+for (phenotype in phenotypes_to_plot) {
+  
+  # Filter the data for the current prevalent phenotype
+  plot_data <- prepared_data %>%
+    filter(Prevalent_Phenotype == phenotype) %>%
+    mutate(X_axis_Label = paste0("C", seurat_clusters, "\n(", sample, ")"))
+
+  # Create the plot
+  p <- ggplot(plot_data, aes(x = X_axis_Label, y = Proportion, fill = labels_RCC)) +
+    geom_col(position = "stack", color = "black", linewidth = 0.2) +
+    scale_y_continuous(labels = scales::percent, expand = c(0, 0)) +
+    scale_fill_viridis_d(option = "D", name = "Cell Type") +
+    labs(
+      title = paste("Composition of", phenotype, "Dominant Clusters"),
+      subtitle = "Clusters grouped by prevalent cell type across all samples",
+      x = "Cluster (Sample)",
+      y = "Proportion of Cells within Cluster"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5, margin = margin(b = 10)),
+      # The line below has been changed
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 11), # <-- Text size increased
+      axis.title = element_text(size = 12),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "right"
+    )
+  
+  print(p)
+  composition_plots_by_phenotype[[phenotype]] <- p
+}
+```
+
+I see that in the seurat object , cells from different donors share the same clusters.
+
+## Entropy Score
+
+[Interpretation:]{.underline}
+
+**Weighted Average Entropy**: Average sample mixedness per cell across all clusters.
+
+  - Lower values (closer to 0) indicate clusters are, on average, less mixed with respect to Population.
+
+```{r}
+# citation("entropy")
+```
+
+**AMI Score:** Agreement between clustering and Population labels (range typically 0 to 1, higher is more agreement).
+
+  - Lower values (closer to 0) suggest the clustering is more independent of Population (often desired after batch correction).
+
+  - Higher values (closer to 1) suggest the clustering strongly reflects Population (could be biological difference or batch effect).
+
+These scores can help compare different clustering runs (e.g., different resolutions or batch correction approaches).
+
+### Calculate Cluster Entropy
+
+This script groups your data by cluster and then applies the entropy calculation to the `labels_RCC` annotations within each group.
+
+```{r}
+# --- Load necessary libraries ---
+library(entropy)
+library(aricode)
+
+cat("--- Calculating overall quality scores for the RRC_harmony clustering... ---\n")
+
+# 1. Get the cluster assignments and phenotype labels from your object
+cluster_identities <- RRC_harmony$seurat_clusters
+phenotype_labels <- RRC_harmony$labels_RCC
+
+# --- Calculate Weighted Average Entropy ---
+
+# Split the phenotype labels by their assigned cluster
+phenotypes_split_by_cluster <- split(phenotype_labels, cluster_identities)
+
+# Calculate the individual entropy for each cluster based on phenotype mixing
+individual_entropy_per_cluster <- sapply(phenotypes_split_by_cluster, function(phenotypes_in_cluster) {
+  # Create a frequency table of phenotypes within the cluster
+  freq_table <- table(phenotypes_in_cluster)
+  # Use the entropy function from the 'entropy' package
+  entropy::entropy(freq_table, unit = "log")
+})
+
+# Get the number of cells in each cluster to use as weights
+cluster_counts <- table(cluster_identities)
+
+# Calculate the final weighted average entropy score
+weighted_avg_entropy <- weighted.mean(individual_entropy_per_cluster, cluster_counts)
+
+cat("\nWeighted Average Entropy (labels_RCC per cluster):\n")
+print(weighted_avg_entropy)
+
+# --- Calculate Adjusted Mutual Information (AMI) ---
+
+# Directly compare the two groupings to get the AMI score
+ami_score <- aricode::AMI(cluster_identities, phenotype_labels)
+
+cat("\nAdjusted Mutual Information (AMI) between clusters and labels_RCC:\n")
+print(ami_score)
+```
+
+Per cluster
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(entropy)
+
+cat("--- Generating a detailed summary for each Seurat cluster... ---\n")
+
+# Use a single dplyr pipeline to calculate multiple metrics for each cluster
+cluster_summary_table <- RRC_harmony@meta.data %>%
+  # Group data by the cluster identifier
+  group_by(seurat_clusters) %>%
+  # Calculate a set of summary metrics for each cluster
+  summarise(
+    Cell_Count = n(),
+    
+    # Calculate the entropy of the 'labels_RCC' distribution
+    Entropy = entropy::entropy(table(labels_RCC)),
+    
+    # Calculate the purity (proportion of the most common phenotype)
+    Purity = max(prop.table(table(labels_RCC))),
+    
+    # Identify the most frequent (prevalent) phenotype in the cluster
+    Prevalent_Phenotype = names(which.max(table(labels_RCC)))
+  ) %>%
+  # Arrange the table by descending entropy for clarity
+  arrange(desc(Entropy))
+
+# Print the final summary table
+print(cluster_summary_table)
+```
+
+The terms **AMI** and **WAE** represent different calculations than **Entropy** and **Purity**.
+
+### Clarification: Per-Cluster vs. Overall Metrics
+
+-   **Metrics in Your Current Table (Per-Cluster):**
+
+    -   **Entropy**: Measures the diversity or "mixed-ness" of cell types *within one specific cluster*.
+
+    -   **Purity**: Measures how much *one specific cluster* is dominated by a single cell type.
+
+-   **Metrics Calculated Previously (Overall):**
+
+    -   **AMI (Adjusted Mutual Information)**: Is a single score that compares the *entire clustering* against the *entire set of labels*. It cannot be calculated for an individual cluster.
+
+    -   **WAE (Weighted Average Entropy)**: Is the average of all the individual cluster entropies. It's also a single score for the entire dataset.
+
+Renaming the `Entropy` and `Purity` columns to `AMI` and `WAE` would be technically incorrect and could cause confusion.
+
+------------------------------------------------------------------------
+
+### \## Recommended Solution
+
+The best practice is to keep the scientifically accurate names, `Entropy` and `Purity`, as they correctly describe what is being measured for each cluster.
+
+However, if you'd like to rename them for presentation purposes, here is the code. I've used alternative names that are still descriptive of the per-cluster calculation.
+
+##### Save rds
+
+You can save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+
+```{r saveobject, eval=FALSE}
+# saveRDS(RRC_harmony, file = "./RRC_harmony.rds") # Current working directory 
+```
+
+# Biological Identityf of cluster found
+
+eate a list of well-known genes that identify different B cell subtypes. Here is a starter list you can use and expand upon.
+
+```{r}
+# Define a list of features (genes) to check
+b_cell_markers <- list(
+  "Pan-B Cell" = c("MS4A1", "CD19", "CD79A", "CD79B"),
+  "Naive" = c("IGHD", "IGHM", "IL4R"),
+  "Memory" = c("CD27", "IGHG1"), # Note: IGHG1 is just one example of a class-switched antibody
+  "Plasma" = c("SDC1", "XBP1", "PRDM1"),
+  "Germinal Center" = c("AICDA", "BCL6")
+)
+
+# You can unlist for functions that need a simple vector
+all_markers_vector <- unlist(b_cell_markers)
+
+ Create a dot plot for all markers
+# The output is a clear grid showing which clusters correspond to which cell types
+DotPlot(RRC_harmony, features = b_cell_markers) +
+  # Rotate the x-axis labels for better readability
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+fgdgd
+
+```{r}
+# --- 1. Load Necessary Libraries ---
+library(patchwork)
+library(ggplot2)
+
+# --- 2. Define the Final Marker List (without Pan-B Cell) ---
+final_b_cell_markers <- list(
+  "Naive" = c("IGHD", "TCL1A", "SELL", "IL4R"),
+  "Memory" = c("CD27", "TNFRSF13B", "CD38"),
+  "DN_ABC" = c("IGHD", "TBX21", "CXCR5", "ITGAX", "FCRL5", "CR2"),
+  "GC" = c("SUGCT", "BCL6", "IL21R"),
+  "Proliferation" = c("PCNA", "MKI67"),
+  "Plasmablast_Plasma_cell" = c("CD38", "PRDM1", "XBP1", "CD27", "SLAMF7", 
+                                "IGHG1", "IGHG3", "IGHG4", "IGHA2"),
+  "Activation" = c("CD69", "CD83", "NR4A2", "BCL2A1"),
+  "Stress" = c("HSPA1A", "HSPA1B")
+  #,
+  #"Regulatory" = c("IL10", "TGFB1", "EBI3", "IL6", "CD274", "HAVCR2")
+)
+
+# --- 3. Create a Plot for Each Category and Combine ---
+plot_list <- lapply(names(final_b_cell_markers), function(category) {
+  
+  genes_to_plot <- unique(final_b_cell_markers[[category]])
+  
+  p <- DotPlot(RRC_harmony, features = genes_to_plot) +
+    scale_color_gradientn(colors = c("blue", "lightyellow", "red")) +
+    xlab(category) + 
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      legend.position = "none",
+      axis.title.x = element_text(face = "bold", size = 12)
+    )
+  
+  return(p)
+})
+
+
+# A more explicit alternative to position the legend at the bottom
+wrap_plots(plot_list, nrow = 1) + 
+  plot_layout(guides = "collect") & theme(legend.position = 'bottom')
+```
+
+```{r}
+{r}
+# --- 1. Load Necessary Libraries ---
+library(patchwork)
+library(ggplot2)
+
+# --- 2. Define the Final Marker List (without Pan-B Cell) ---
+final_b_cell_markers <- list(
+
+  "Regulatory" = c("CR2", "ITGAX")
+)
+
+# --- 3. Create a Plot for Each Category and Combine ---
+plot_list <- lapply(names(final_b_cell_markers), function(category) {
+  
+  genes_to_plot <- unique(final_b_cell_markers[[category]])
+  
+  p <- DotPlot(RRC_harmony, features = genes_to_plot) +
+    scale_color_gradientn(colors = c("blue", "lightyellow", "red")) +
+    xlab(category) + 
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      legend.position = "none",
+      axis.title.x = element_text(face = "bold", size = 12)
+    )
+  
+  return(p)
+})
+
+
+# A more explicit alternative to position the legend at the bottom
+wrap_plots(plot_list, nrow = 1) + 
+  plot_layout(guides = "collect") & theme(legend.position = 'bottom')
+```
+
+```{r}
+{r}
+# --- 1. Load Necessary Libraries ---
+library(patchwork)
+library(ggplot2)
+
+# --- 2. Define the Final Marker List (without Pan-B Cell) ---
+final_b_cell_markers <- list(
+  "Naive" = c("IGHD", "TCL1A", "SELL", "IL4R"),
+  "Memory" = c("CD27", "TNFRSF13B", "CD38"),
+  "DN_ABC" = c("IGHD", "TBX21", "CXCR5", "ITGAX", "FCRL5", "CR2"),
+  "GC" = c("SUGCT", "BCL6", "IL21R"),
+  "Proliferation" = c("PCNA", "MKI67"),
+  "Plasmablast_cell" = c("CD38", "PRDM1", "XBP1", "CD27", "SLAMF7", 
+                                "IGHG1", "IGHG3", "IGHG4", "IGHA2"),
+  "Regulatory" = c("IL10", "TGFB1", "EBI3", "IL6", "CD274", "HAVCR2")
+)
+
+# --- 3. Create a Plot for Each Category and Combine ---
+plot_list <- lapply(names(final_b_cell_markers), function(category) {
+  
+  genes_to_plot <- unique(final_b_cell_markers[[category]])
+  
+  p <- DotPlot(RRC_harmony, features = genes_to_plot) +
+    scale_color_gradientn(colors = c("blue", "lightyellow", "red")) +
+    xlab(category) + 
+    theme(
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      legend.position = "none",
+      axis.title.x = element_text(face = "bold", size = 12)
+    )
+  
+  return(p)
+})
+
+
+# A more explicit alternative to position the legend at the bottom
+wrap_plots(plot_list, nrow = 1) + 
+  plot_layout(guides = "collect") & theme(legend.position = 'bottom')
+```
+
+------------------------------------------------------------------------
+
+To correct:
+
+```{r}
+# --- Create the final mapping based on the DotPlot interpretation ---
+cluster_to_celltype_map <- c(
+  "0" = "Naive",
+  "1" = "Naive Acti/Stress",
+  "2" = "Naive Activ",
+  "3" = "Acti Folli ABC-FCRL5 ",
+  "4" = "non-Cla Memory Reactiv.",
+  "5" = "non-Cla Memory",
+  "6" = "Folli Breg",
+  "7" = "Folli Breg Activ",
+  "8" = "DN Activ",
+  "9" = "Naïve-early Act",
+  "10" = "DN Inac/ABC",
+  "11" = "DN Stressed",
+  "12" = "DN Activ/Stressed",
+  "13" = "Naïve mild Activ",
+  "14" = "Transitional Folli Breg",
+  "15" = "PB XBP1 ",
+  "16" = "GC-BCL6"
+)
+
+# --- This is the corrected section ---
+
+# 1. Create the vector of new cell identities
+new_cell_identities <- cluster_to_celltype_map[RRC_harmony$seurat_clusters]
+
+# 2. Create a data frame with cell barcodes as row names
+metadata_to_add <- data.frame(
+  manual_cell_type = new_cell_identities,
+  row.names = rownames(RRC_harmony@meta.data)
+)
+
+# 3. Add this new data frame to your Seurat object's metadata
+RRC_harmony <- AddMetaData(
+  object = RRC_harmony,
+  metadata = metadata_to_add
+)
+
+# --- Visualize the final annotated UMAP ---
+# This DimPlot command will now work correctly
+DimPlot(RRC_harmony, group.by = "manual_cell_type", label = TRUE, repel = TRUE)
+```
+
+Comparison with Original Annotation
+
+```{r}
+# Load the patchwork library
+library(patchwork)
+
+# 1. Create the "Before" plot (colored by original cluster numbers)
+plot_before <- DimPlot(RRC_harmony, group.by = "labels_RCC", label = TRUE, repel = TRUE) +
+  labs(title = "Original Analysis")
+
+# 2. Create the "After" plot (colored by your manual labels)
+plot_after <- DimPlot(RRC_harmony, group.by = "manual_cell_type", label = TRUE, repel = TRUE) +
+  labs(title = "Optimized Pipeline")
+
+# 3. Display the plots side-by-side
+plot_after + plot_before 
+```
+
+Top one gene for each cluster.
+
+```{r}
+# Set the active identity to your new manual labels
+Idents(RRC_harmony) <- "manual_cell_type"
+
+# Find all markers for each cell type
+# This compares each identity against all others
+all_population_markers <- FindAllMarkers(
+  RRC_harmony, 
+  only.pos = TRUE,      # Only find positive markers
+  min.pct = 0.25,       # Find genes expressed in at least 25% of cells
+  logfc.threshold = 0.25 # Find genes with at least this log-fold change
+)
+
+# Load the dplyr library
+library(dplyr)
+
+# Group the markers by population and select the top one
+top_markers_per_population <- all_population_markers %>%
+  group_by(cluster) %>% # 'cluster' column holds the population names
+  slice_max(n = 1, order_by = avg_log2FC)
+
+# Print the final table of top markers
+print(top_markers_per_population)
+```
+
+### Compositon Plot Code
+
+Generate Overall Cluster Composition Plot
+
+```{r}
+# --- Generate Overall Cluster Composition Plot ---
+
+# 1. Extract metadata and calculate proportions for the whole dataset
+# The object is now RRC_harmony and we group by your new manual_cell_type column
+overall_composition <- RRC_harmony@meta.data %>%
+  dplyr::group_by(manual_cell_type) %>%
+  # Count the number of cells in each cell type
+  dplyr::tally() %>%
+  # Ungroup and calculate the proportion relative to the total number of cells
+  dplyr::ungroup() %>%
+  dplyr::mutate(proportion = n / sum(n))
+
+# 2. Create the bar plot with ggplot2
+overall_plot <- ggplot(overall_composition, aes(x = manual_cell_type, y = proportion, fill = manual_cell_type)) +
+  geom_col() + # Creates the bar chart
+  scale_y_continuous(labels = scales::percent_format()) + # Format y-axis as percentage
+  scale_fill_viridis_d(option = "D") + # Optional: use a nice color palette
+  labs(
+    title = "Overall Cell Type Composition",
+    x = "Manual Cell Type",
+    y = "Proportion of Total Cells"
+  ) +
+  theme_classic() +
+  # Hide the redundant legend and rotate x-axis labels for readability
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none" 
+  )
+
+# 3. Print the plot
+print(overall_plot)
+```
+
+Order by differentiation
+
+```{r}
+# --- 1. Define your new, detailed cluster-to-celltype mapping ---
+# This map assigns your new names to the original cluster IDs.
+cluster_to_celltype_map <- c(
+  "0" = "Naive",
+  "1" = "Naive Acti/Stress",
+  "2" = "Naive Activ",
+  "3" = "Acti Folli ABC-FCRL5",
+  "4" = "non-Cla Memory Reactiv.",
+  "5" = "non-Cla Memory",
+  "6" = "Folli Breg",
+  "7" = "Folli Breg Activ",
+  "8" = "DN Activ",
+  "9" = "Naïve-early Act",
+  "10" = "DN Non-Activ",
+  "11" = "DN Stressed",
+  "12" = "DN Activ/Stressed",
+  "13" = "Naïve-early Activ",
+  "14" = "Transitional Folli Breg",
+  "15" = "PB XBP1",
+  "16" = "GC-BCL6"
+)
+
+# --- 2. Add these new names to your Seurat object's metadata ---
+# This will create/overwrite the 'manual_cell_type' column.
+metadata_to_add <- data.frame(
+  manual_cell_type = cluster_to_celltype_map[RRC_harmony$seurat_clusters],
+  row.names = rownames(RRC_harmony@meta.data)
+)
+RRC_harmony <- AddMetaData(
+  object = RRC_harmony,
+  metadata = metadata_to_add
+)
+
+# --- 3. Define the desired order for the x-axis ---
+differentiation_order <- c(
+  # Naive States
+  "Naive", 
+  "Naive Activ", 
+  "Naive Acti/Stress",
+  "Naïve-early Act", 
+  "Naïve-early Activ",
+  # Memory States
+  "non-Cla Memory", 
+  "non-Cla Memory Reactiv.",
+  # DN States
+  "DN Non-Activ", 
+  "DN Activ", 
+  "DN Stressed", 
+  "DN Activ/Stressed",
+  # Special Populations
+  "Folli Breg", 
+  "Folli Breg Activ", 
+  "Transitional Folli Breg", 
+  "Acti Folli ABC-FCRL5", 
+  "GC-BCL6", 
+  "PB XBP1"
+)
+
+# --- 4. Generate the ordered composition plot ---
+overall_composition <- RRC_harmony@meta.data %>%
+  dplyr::group_by(manual_cell_type) %>%
+  dplyr::tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(proportion = n / sum(n)) %>%
+  # Apply the new factor ordering
+  dplyr::mutate(manual_cell_type = factor(manual_cell_type, levels = differentiation_order)) %>%
+  dplyr::filter(!is.na(manual_cell_type))
+
+overall_plot <- ggplot(overall_composition, aes(x = manual_cell_type, y = proportion, fill = manual_cell_type)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_viridis_d(option = "D") +
+  labs(
+    title = "Overall Cell Type Composition",
+    x = "Cell Type (Ordered by Differentiation)",
+    y = "Proportion of Total Cells"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+# Print the final plot
+print(overall_plot)
+
+```
+
+#### Better defined clusters with the optimized pipeline
+
+the new cluster names are stored in a metadata column called **`manual_cell_type`**.
+
+```{r}
+# You create a data frame with the column named "manual_cell_type"
+metadata_to_add <- data.frame(
+  manual_cell_type = new_cell_identities, 
+  row.names = rownames(RRC_harmony@meta.data)
+)
+
+# You then add this data frame (and its column) to the Seurat object
+RRC_harmony <- AddMetaData(
+  object = RRC_harmony,
+  metadata = metadata_to_add
+)
+# This correctly uses the "manual_cell_type" column for grouping
+DimPlot(RRC_harmony, group.by = "manual_cell_type", label = TRUE, repel = TRUE)
+```
+
+Final figure
+
+```{r}
+# --- Visualize the Corrected Results ---
+cat("Visualizing Harmony-corrected UMAPs...\n")
+
+# Plot colored by sample to see if the batches are better mixed
+plot_sample <- DimPlot(RRC_harmony, reduction = "umap", group.by = "sample", label = TRUE, repel = TRUE)
+
+# Plot colored by cell type to ensure biological structure is preserved
+plot_celltype <- DimPlot(RRC_harmony, reduction = "umap", group.by = "manual_cell_type", label = TRUE, repel = TRUE)
+
+# View the plots side-by-side to compare
+print(plot_sample + plot_celltype)
+```
+
+better visualition:
+
+```{r}
+# --- 1. Define Your Custom Colors ---
+# First, create a named vector where the names are your exact sample IDs
+# and the values are the colors you want to use.
+
+my_sample_colors <- c(
+      "RCC_D36_1" = "#8dd3c7", # Light Teal
+      "RCC_D36_2" = "#ffffb3", # Light Yellow
+      "RCC_D36_3" = "#bebada", # Lavender
+      "RCC_D36_4" = "#fb8072", # Coral
+      "RCC_D36_5" = "#80b1d3", # Light Blue
+      "RCC_D36_6" = "#fdb462", # Orange
+      "RCC3"      = "#b3de69", # Green
+      "RCC8"      = "#fccde5", # Pink
+      "RCC9"      = "#d9d9d9"  # Grey
+)
+
+# --- 2. Apply the Custom Colors to Your Plot ---
+
+# Plot colored by sample, adding the scale_color_manual() layer
+plot_sample <- DimPlot(RRC_harmony, reduction = "umap", group.by = "sample", label = TRUE, repel = TRUE) +
+  scale_color_manual(values = my_sample_colors) +
+  labs(title = "Samples after Harmony Correction") # Add a title for clarity
+
+# Plot colored by cell type (this remains unchanged)
+plot_celltype <- DimPlot(RRC_harmony, reduction = "umap", group.by = "manual_cell_type", label = TRUE, repel = TRUE) +
+  labs(title = "Manual Cell Type")
+
+# --- 3. View the Plots Side-by-Side ---
+# The plot for 'sample' will now use your new, more distinct colors.
+print(plot_celltype + plot_sample)
+```
+
+Correlation Sample and manual_cell_type
+
+```{r}
+# Load necessary libraries if you haven't already
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+generate_purity_plot_per_cluster <- function(
+    base_seurat_object,
+    cluster_col = "manual_cell_type", # The column with your cell type annotations
+    sample_col = "sample"             # The column with the sample IDs
+) {
+
+  # --- 1. Use dplyr to calculate sample composition for each cell type ---
+  # This is the core logic change.
+  composition_df <- base_seurat_object@meta.data %>%
+    dplyr::group_by(.data[[cluster_col]]) %>%              # Group by the cell type
+    dplyr::count(.data[[sample_col]], name = "count") %>%  # Count cells from each sample within that group
+    dplyr::mutate(Proportion = count / sum(count)) %>%     # Calculate the proportion of each sample
+    dplyr::ungroup() %>%
+    dplyr::rename(Cell_Type = !!sym(cluster_col), Sample = !!sym(sample_col)) # Rename for clarity
+
+  # --- 2. Create the plot ---
+  purity_plot <- ggplot(composition_df, aes(x = Cell_Type, y = Proportion, fill = Sample)) +
+    geom_bar(stat = "identity", color = "black", linewidth = 0.2, width = 0.9) +
+    scale_fill_viridis_d(name = "Sample") +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+      title = "Sample Contribution to Each Cell Cluster",
+      subtitle = "Showing the proportion of cells from each sample within each cluster",
+      x = "Manual Cell Type",
+      y = "Proportion of Cells"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      legend.position = "right"
+    )
+
+  # Print and return the plot
+  print(purity_plot)
+  return(purity_plot)
+}
+
+# --- 3. Call the new function ---
+# You only need a single function call, no loop is required.
+generate_purity_plot_per_cluster(
+  base_seurat_object = RRC_harmony,
+  cluster_col = "manual_cell_type",
+  sample_col = "sample"
+)
+```
+
+Improved
+
+```{r}
+# Load necessary libraries if you haven't already
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+generate_purity_plot_per_cluster <- function(
+    base_seurat_object,
+    cluster_col = "manual_cell_type", # The column with your cell type annotations
+    sample_col = "sample"             # The column with the sample IDs
+) {
+
+  # --- 1. Use dplyr to calculate sample composition for each cell type ---
+  composition_df <- base_seurat_object@meta.data %>%
+    dplyr::group_by(.data[[cluster_col]]) %>%
+    dplyr::count(.data[[sample_col]], name = "count") %>%
+    dplyr::mutate(Proportion = count / sum(count)) %>%
+    dplyr::ungroup() %>%
+    dplyr::rename(Cell_Type = !!sym(cluster_col), Sample = !!sym(sample_col))
+
+  # --- 2. DEFINE CUSTOM COLORS ---
+  # Create a named vector of colors. The names MUST match the unique values
+  # in your 'sample' column.
+  my_custom_colors <- c(
+      "RCC_D36_1" = "#8dd3c7", # Light Teal
+      "RCC_D36_2" = "#ffffb3", # Light Yellow
+      "RCC_D36_3" = "#bebada", # Lavender
+      "RCC_D36_4" = "#fb8072", # Coral
+      "RCC_D36_5" = "#80b1d3", # Light Blue
+      "RCC_D36_6" = "#fdb462", # Orange
+      "RCC3"      = "#b3de69", # Green
+      "RCC8"      = "#fccde5", # Pink
+      "RCC9"      = "#d9d9d9"  # Grey
+      # Add more if you have other sample names
+  )
+
+
+  # --- 3. Create the plot ---
+  purity_plot <- ggplot(composition_df, aes(x = Cell_Type, y = Proportion, fill = Sample)) +
+    geom_bar(stat = "identity", color = "black", linewidth = 0.2, width = 0.9) +
+    
+    # --- THIS IS THE ADDED LINE ---
+    # Apply your manually defined color palette
+    scale_fill_manual(values = my_custom_colors, name = "Sample") +
+    
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+     # title = "Sample Contribution to Each Cell Cluster",
+     # subtitle = "Showing the proportion of cells from each sample within each cluster",
+    #  x = "Manual Cell Type",
+      y = "Proportion of Cells"
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      legend.position = "right"
+    )
+
+  # Print and return the plot
+  print(purity_plot)
+  return(purity_plot)
+}
+
+# --- 4. Call the function ---
+# The function will now use your new, more distinct colors.
+generate_purity_plot_per_cluster(
+  base_seurat_object = RRC_harmony,
+  cluster_col = "manual_cell_type",
+  sample_col = "sample"
+)
+```
+
+### SessionINFO:
+
+```{r}
+sessionInfo()
+```

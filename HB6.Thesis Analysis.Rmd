@@ -1,0 +1,2421 @@
+---
+title: "Seurat - Guided Clustering Tutorial"
+output:
+  html_document:
+    theme: united
+    df_print: kable
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+## Experimental Parameters Been tested
+
+```{r parameters}
+# FILTERING QC1
+# 3. Define the filtering thresholds
+min_cells_threshold <-3      # Your threshold for min.cells
+min_features_threshold <- 200 # Your threshold for min.features (for cells)
+
+# FILTERING QC2
+limit_mt <- 12
+limit_Feature_RNA <- 2500
+limit_ribo <- 20
+
+# VARIATION: Removing unwanted sources of variation:
+# Define the variables you want to regress out ( remove the influence of these variables from each gene's expression values before the final scaling of residuals):
+variables_to_regress <- c()  
+#"orig.ident"       "nCount_RNA"       "nFeature_RNA"     "Sample"    "percent.mt"       "percent.ribo"     "percent.ig.total" "counts.ig.total"  "percent.tcr"  "counts.tcr"  
+
+# >>>>>> SET YOUR CLUSTERING SCENARIO HERE <<<<<<
+# Choose one of the following options by uncommenting the desired line:
+# scenario_name <- "Scenario_1_No_IgVDJ"        ; exclude_sets_for_scenario <- c("ig_vdj")
+# scenario_name <- "Scenario_2_No_Ig_Const"    ; exclude_sets_for_scenario <- c("ig_constant")
+# scenario_name <- "Scenario_3_No_IgLL"        ; exclude_sets_for_scenario <- c("igll")
+# scenario_name <- "Scenario_4_No_TCR"         ; exclude_sets_for_scenario <- c("tcr")
+# scenario_name <- "Scenario_5_No_Removal"     ; exclude_sets_for_scenario <- c() # Keep all variable features
+# scenario_name <- "Scenario_6_Remove_All_Sets"   ; exclude_sets_for_scenario <- c("ig_vdj", "ig_constant", "igll", "tcr") # All sets removed
+ 
+ scenario_name <- "Scenario_Keep_IgConstant_No_VDJ"
+exclude_sets_for_scenario <- c("ig_vdj", "igll", "tcr") # Keeps "ig_constant"
+
+# CLUSTERING
+dimen <- 14
+resol <- 0.5
+
+#FILTERING
+nfeat = 2000 # selection of the number of highly variable features
+
+# -- Section Entropy---
+  # limit population clustering population for Entropy score (%):
+percentage_threshold <- 2.5
+
+```
+
+## Introduction subset paper
+
+#### [**peripheral blood B cell scRNA-seq**]{.underline}
+
+P​aper: [https://doi.org/10.3389/fimmu.2021.602539](https://linkprotect.cudasvc.com/url?a=https%3a%2f%2fdoi.org%2f10.3389%2ffimmu.2021.602539&c=E,1,GfVIaslsG1U3s2cGauHDGTJV88_0rkz-1jMZcduANMTHyvR28IZTDRjal0VB5uMVrFk-IdJ08GQI8TMZMsp5E4gTn8z_Hv-RE8PTu7kzJfeoziyCEzLVyYo,&typo=1)  
+
+Let see which populations we can analysed:
+
+```{r}
+# Define the data for each column
+population_names <- c("Transitional", "Naïve", "IgM Memory", "Classical_Memory Memory", "Double Negative")
+cd19_status <- c("+", "+", "+", "+", "+")
+igd_status <- c("+", "+", "+", "-", "-")
+cd27_status <- c("-", "-", "+", "+", "-")
+cd10_status <- c("+", "-", "N/A*", "N/A*", "N/A*")
+descriptions <- c(
+  "Early B cell stage",
+  "Mature, unactivated B cell",
+  "Memory B cell retaining IgM/IgD",
+  "Class-switched memory B cell",
+  "Atypical/Exhausted/Memory B cell (?)"
+)
+
+# Create the data frame (using tibble for better display)
+b_cell_populations <- data.frame(
+  Population = population_names,
+  CD19 = cd19_status,
+  CD27 = cd27_status,
+  CD10 = cd10_status,
+  IgD = igd_status,
+  Description = descriptions,
+  stringsAsFactors = FALSE # Good practice
+)
+
+# Print the data frame
+print(b_cell_populations)
+
+```
+
+## Processes
+
+![](images/clipboard-3391459959.png)
+
+## Package Loading
+
+```{r init}
+library(hdf5r) # Needed by Read10X_h5
+library(Seurat) # For Seurat objects and functions like Idents
+library(dplyr)      # For data manipulation (used for text label positioning)
+library(ggplot2)    # For plotting
+library(RColorBrewer) # For enhanced color palettes (optional, for scale_fill_brewer)
+library(patchwork) # For combining ggplot objects
+```
+
+# Data Preprocessing:
+
+Cells were selected for further analyses according to the following criteria: (i) express zero CD3E, GNLY, CD14, FCER1A, GCGR3A, LYZ, PPBP and CD8A transcripts, to exclude any non-B cells :
+
+*"Cells were selected for further analyses according to the following criteria: (i) [express zero CD3E, GNLY, CD14, FCER1A, GCGR3A, LYZ, PPBP and CD8A transcripts,]{.underline} to exclude any non-B cells and; (ii) express at least 200 distinct genes. Additionally, [cells with total transcript count in the top 1% percentile were removed,]{.underline} as these cells were manually inspected to express transcripts of multiple V gene families per cell, indicating possible cell clumps tagged with the same barcode."*
+
+## Dataset processing
+
+### `Loading datasets of HB6 (dgMatrices)`
+
+We collect the 5 datasets of HB6 donor:
+
+```{r dataset loading}
+
+# Define the directory where the files are located
+data_dir <- "./Data/"
+
+# --- Load each file individually ---
+
+# Load Classical_Memory data
+cat("Loading classical_filtered_feature_bc_matrix.h5 ...\n")
+Classical_Memory_file_path <- paste0(data_dir, "classical_filtered_feature_bc_matrix.h5")
+Classical_Memory.data <- Read10X_h5(filename = Classical_Memory_file_path)
+cat("Loaded Classical_Memory.data with dimensions:", dim(Classical_Memory.data), "\n\n")
+
+# Load DN data
+cat("Loading dn_filtered_feature_bc_matrix.h5 ...\n")
+DN_file_path <- paste0(data_dir, "dn_filtered_feature_bc_matrix.h5")
+DN.data <- Read10X_h5(filename = DN_file_path)
+cat("Loaded DN.data with dimensions:", dim(DN.data), "\n\n")
+
+# Load IgM_Memory data
+cat("Loading IgM_Memory_filtered_feature_bc_matrix.h5 ...\n")
+IgM_Memory_file_path <- paste0(data_dir, "igmmem_filtered_feature_bc_matrix.h5")
+IgM_Memory.data <- Read10X_h5(filename = IgM_Memory_file_path)
+cat("Loaded IgM_Memory.data with dimensions:", dim(IgM_Memory.data), "\n\n")
+
+# Load Naive data
+cat("Loading naive_filtered_feature_bc_matrix.h5 ...\n")
+Naive_file_path <- paste0(data_dir, "naive_filtered_feature_bc_matrix.h5")
+Naive.data <- Read10X_h5(filename = Naive_file_path)
+cat("Loaded Naive.data with dimensions:", dim(Naive.data), "\n\n")
+
+# Load Transitional data
+cat("Loading trans_filtered_feature_bc_matrix.h5 ...\n")
+Transitional_file_path <- paste0(data_dir, "trans_filtered_feature_bc_matrix.h5")
+Transitional.data <- Read10X_h5(filename = Transitional_file_path)
+cat("Loaded Transitional.data with dimensions:", dim(Transitional.data), "\n\n")
+
+# You now have 5 separate count matrices (Matrix of class "dgCMatrix") loaded into R:
+# Classical_Memory.data
+# DN.data 
+# IgM_Memory.data
+# Naive.data
+# Transitional.data
+# Each is a count matrix representing the data from one of your .h5 files.
+```
+
+### Combining the Seurat objects (HB6)
+
+Combine the count matrices (combining the 5 Seurat objects):
+
+```{r data combining}
+
+# Define sample names corresponding to the count matrices (these will be used to label cells)
+sample_names <- c("Classical_Memory", "DN", "IgM_Memory", "Naive", "Transitional")
+
+# Create a list of your count matrices for easier iteration (optional but clean)
+# count_matrices_list <- list(
+#   Classical_Memory = Classical_Memory.data,
+#   DN = DN.data,
+#   IgM_Memory = IgM_Memory.data,
+#   Naive = Naive.data,
+#   Transitional = Transitional.data
+# )
+
+# 1. Create a Seurat object for each count matrix
+
+cat("Creating Seurat objects for each sample...\n")
+
+# Create object for Classical_Memory
+Classical_Memory_seurat <- CreateSeuratObject(counts = Classical_Memory.data, project = sample_names[1])
+cat("Created Seurat object for", sample_names[1], "with", ncol(Classical_Memory_seurat), "cells.\n")
+
+# Create object for DN
+DN_seurat <- CreateSeuratObject(counts = DN.data, project = sample_names[2])
+cat("Created Seurat object for", sample_names[2], "with", ncol(DN_seurat), "cells.\n")
+
+# Create object for IgM_Memory
+IgM_Memory_seurat <- CreateSeuratObject(counts = IgM_Memory.data, project = sample_names[3])
+cat("Created Seurat object for", sample_names[3], "with", ncol(IgM_Memory_seurat), "cells.\n")
+
+# Create object for Naive
+Naive_seurat <- CreateSeuratObject(counts = Naive.data, project = sample_names[4])
+cat("Created Seurat object for", sample_names[4], "with", ncol(Naive_seurat), "cells.\n")
+
+# Create object for Transitional
+Transitional_seurat <- CreateSeuratObject(counts = Transitional.data, project = sample_names[5])
+cat("Created Seurat object for", sample_names[5], "with", ncol(Transitional_seurat), "cells.\n")
+
+# You now have 5 individual Seurat objects:
+# Classical_Memory_seurat, DN_seurat, IgM_Memory_seurat, Naive_seurat, Transitional_seurat
+
+
+# 2. Combine (Merge) the individual Seurat objects into one large merged object
+
+cat("\nMerging Seurat objects...\n")
+
+# The merge function takes the first object as 'x' and a list of the others as 'y'.
+# The 'project' names assigned during CreateSeuratObject will be used
+# to populate the 'orig.ident' column in the metadata of the merged object.
+
+HB6 <- merge(
+  x = Classical_Memory_seurat,     # Start with the first object
+  y = list(DN_seurat, IgM_Memory_seurat, Naive_seurat, Transitional_seurat), # A list of the remaining objects
+  add.add.info = TRUE       # Optional: Adds original cell names to avoid conflicts if barcodes overlap
+)
+cat("\nMerging complete. Total cells in merged object:", ncol(HB6), ".\n")
+
+# 'merged_seurat_object' is now a single Seurat object containing data from all 5 files.
+# The original sample identity for each cell is stored in the 'orig.ident' column of the metadata.
+# You can view the original sample names in the merged object:
+# unique(HB6$orig.ident)
+
+# which columns in the metadata ?
+# colnames(HB6@meta.data) #"orig.ident"   "nCount_RNA"   "nFeature_RNA"
+```
+
+however, I have issues with the counts layers:
+
+```{r}
+# print(HB6[["RNA"]])
+# dim(HB6[["RNA"]]$counts)
+```
+
+So we will combine the layers.
+
+### Combining all count layers into a single ayer:
+
+I have 5 layers, combine in 1 layer called counts:
+
+```{r}
+# Assuming your original merged Seurat object is named 'HB6'
+# The new combined object will be 'HB6.a'
+
+# 1. Get the names of the count layers you want to combine
+# These are typically from different samples or modalities you want to merge into one 'counts' layer.
+count_layer_names <- c("counts.Classical_Memory", "counts.DN", "counts.IgM_Memory", "counts.Naive", "counts.Transitional")
+
+# 2. Extract the count matrices and combine them by column (cells)
+# LayerData extracts the specific layer. Reduce(cbind, ...) efficiently combines all matrices.
+combined_counts_matrix <- Reduce(cbind, lapply(count_layer_names, function(layer_name) {
+  LayerData(object = HB6, assay = "RNA", layer = layer_name) }))
+
+# 3. Create a new Seurat object with the single combined count matrix
+HB6.a <- CreateSeuratObject(counts = combined_counts_matrix, project = "HB6_Combined")
+
+# 4. Transfer relevant metadata from the original object to the new one
+# Select the metadata columns you want to keep. Adjust this list as needed for your data.
+# Common columns: 'nCount_RNA', 'nFeature_RNA', 'orig.ident'. Add any custom ones like 'condition'.
+meta_cols_to_transfer <- c("nCount_RNA", "nFeature_RNA", "orig.ident", "condition") # Add/remove columns as needed
+
+# Filter to get only those columns in meta_cols_to_transfer that actually exist in HB6
+existing_meta_cols <- meta_cols_to_transfer[meta_cols_to_transfer %in% colnames(HB6@meta.data)]
+
+# Transfer the existing metadata columns.
+# If 'existing_meta_cols' is empty (character(0)), this operation will effectively do nothing without error.
+HB6.a@meta.data[existing_meta_cols] <- HB6@meta.data[existing_meta_cols]
+
+# Ensure 'orig.ident' reflects the original sample names correctly
+# This step is crucial if your cell names don't inherently encode the original sample,
+# and if 'orig.ident' was used to track samples in your initial HB6 object.
+HB6.a$orig.ident <- HB6$orig.ident
+
+# Display a quick summary of the new object
+cat("New Seurat object 'HB6.a' created with", ncol(HB6.a), "cells and", nrow(HB6.a), "features.\n")
+print(head(HB6.a@meta.data))
+
+# The new object 'HB6.a' now has a single 'counts' layer and transferred metadata.
+```
+
+checking combined Seurat Object:
+
+```{r checking HB6}
+#str(HB6.a)
+```
+
+```{r checking HB6.a}
+# Verify metadata in the new object
+#head(HB6.a@meta.data)
+#unique(HB6.a$orig.ident) # Check original identities are still there
+```
+
+#### Adding metadata Population
+
+Need for analysis with the other 3 donors
+
+```{r}
+# Assuming your original merged Seurat object is named 'HB6'
+# The new combined object will be 'HB6.a'
+
+# 1. Get the names of the count layers you want to combine
+# These are typically from different samples or modalities you want to merge into one 'counts' layer.
+count_layer_names <- c("counts.Classical_Memory", "counts.DN", "counts.IgM_Memory", "counts.Naive", "counts.Transitional")
+
+# 2. Extract the count matrices and combine them by column (cells)
+# LayerData extracts the specific layer. Reduce(cbind, ...) efficiently combines all matrices.
+cat("Combining count layers...\n") # Added a message
+combined_counts_matrix <- Reduce(cbind, lapply(count_layer_names, function(layer_name) {
+  cat("  Extracting layer:", layer_name, "\n") # Added a message
+  LayerData(object = HB6, assay = "RNA", layer = layer_name) 
+}))
+cat("Count layers combined.\n")
+
+# 3. Create a new Seurat object with the single combined count matrix
+cat("Creating new Seurat object HB6.a...\n") # Added a message
+HB6.a <- CreateSeuratObject(counts = combined_counts_matrix, project = "HB6_Combined")
+cat("HB6.a created.\n")
+
+# 4. Transfer relevant metadata from the original object to the new one
+cat("Transferring metadata...\n") # Added a message
+# Select the metadata columns you want to keep. Adjust this list as needed for your data.
+# Common columns: 'nCount_RNA', 'nFeature_RNA', 'orig.ident'. Add any custom ones like 'condition'.
+meta_cols_to_transfer <- c("nCount_RNA", "nFeature_RNA", "orig.ident", "condition") # Add/remove columns as needed
+
+# Filter to get only those columns in meta_cols_to_transfer that actually exist in HB6
+existing_meta_cols <- meta_cols_to_transfer[meta_cols_to_transfer %in% colnames(HB6@meta.data)]
+
+if (length(existing_meta_cols) > 0) { # Added a check before assigning
+    # Transfer the existing metadata columns.
+    HB6.a@meta.data[, existing_meta_cols] <- HB6@meta.data[match(colnames(HB6.a), colnames(HB6)), existing_meta_cols, drop = FALSE]
+    # Ensure 'orig.ident' reflects the original sample names correctly
+    # This step is crucial if your cell names don't inherently encode the original sample,
+    # and if 'orig.ident' was used to track samples in your initial HB6 object.
+    # The line below assumes cell order is maintained or HB6$orig.ident is correctly ordered for HB6.a cells
+    # A safer way if cell names are consistent and unique:
+    if ("orig.ident" %in% colnames(HB6@meta.data) && all(colnames(HB6.a) %in% colnames(HB6))) {
+         HB6.a$orig.ident <- HB6@meta.data[colnames(HB6.a), "orig.ident"]
+    } else if ("orig.ident" %in% existing_meta_cols) {
+        cat("'orig.ident' transferred as part of existing_meta_cols. Verifying...\n")
+    } else {
+        warning("'orig.ident' could not be reliably transferred or was not in existing_meta_cols.")
+    }
+} else {
+    warning("No specified metadata columns found in original HB6 object to transfer.")
+}
+cat("Metadata transfer attempted.\n")
+
+
+# Display a quick summary of the new object
+cat("\nNew Seurat object 'HB6.a' created with", ncol(HB6.a), "cells and", nrow(HB6.a), "features.\n")
+cat("Head of HB6.a metadata before adding 'Population' column:\n")
+print(head(HB6.a@meta.data))
+
+# --- Create a new metadata column 'Population' by copying 'orig.ident' ---
+cat("\nCreating 'Population' metadata column from 'orig.ident' in HB6.a...\n")
+
+if ("orig.ident" %in% colnames(HB6.a@meta.data)) {
+  HB6.a$Population <- HB6.a$orig.ident
+  cat("'Population' column created successfully.\n")
+
+  # Verify the new column
+  cat("\nFirst few entries of the new 'Population' column:\n")
+  print(head(HB6.a$Population))
+  cat("\nUnique values in 'Population' column:\n")
+  print(unique(HB6.a$Population))
+  cat("\nUpdated metadata head (should now include 'Population'):\n")
+  print(head(HB6.a@meta.data))
+  cat("\nUpdated metadata column names:\n")
+  print(colnames(HB6.a@meta.data))
+} else {
+  warning("'orig.ident' column not found in HB6.a metadata. Cannot create 'Population' column from it.")
+}
+# --- End of new column creation ---
+
+cat("\nNew Seurat object 'HB6.a' now has a single 'counts' layer and transferred metadata (including 'Population' if orig.ident existed).\n")
+```
+
+#### Adding metadata for HB6 donor:
+
+```{r adding metadata to HB6.a}
+# Assuming your Seurat object is named 'HB6.a'
+
+# Define the value you want to add to the new column
+sample_value <- "HB6"
+
+# Get the number of cells in the Seurat object
+num_cells <- ncol(HB6.a)
+
+# Create a vector with the sample_value repeated for each cell
+# The length of this vector must match the number of cells
+sample_metadata_vector <- rep(sample_value, times = num_cells)
+
+# Add this vector as a new metadata column named "Sample" to the Seurat object
+# The AddMetaData function automatically aligns the vector with the cells
+HB6.a <- AddMetaData(
+  object = HB6.a,
+  metadata = sample_metadata_vector,
+  col.name = "Sample" # Specify the name for the new metadata column
+)
+
+# Verify that the new metadata column has been added
+#cat("Metadata columns after adding 'Sample':\n")
+#print(colnames(HB6.a@meta.data))
+
+#cat("\nHead of the new 'Sample' column:\n")
+#print(head(HB6.a$Sample))
+
+#cat("\nUnique values in the 'Sample' column:\n")
+#print(unique(HB6.a$Sample))
+
+# Your HB6.a object now has the 'Sample' metadata column with "HB6" for all cells.
+
+```
+
+# Paper Gene filtering
+
+### Filtering Excluding genes (axing1)
+
+Only consider cells that have no expression ( 0 counts) of the exclusion genes ([*CD3E, GNLY, CD14, FCER1A, FCGR3A, LYZ, PPBP and CD8A transcripts) (*]{.underline}It goes from 10333 cells to 10004 cells)[*:*]{.underline}
+
+**Could we detect those genes in the count (raw) matrix ?** I tested DN dataset raw counts. See that type error in paper where GCGR gene appears instead of the FCGR3A.
+
+```{r}
+# # List the genes you want to exclude based on zero expression
+# exclusion_genes <- c("CD3E", "GNLY", "CD14", "FCER1A", "GCGR", "LYZ", "PPBP", "CD8A")
+# # Lets examine those genes in the first thirty cells
+# DN.data[c("CD8A","CD3E", "GNLY","CD14", "FCER1A", "LYZ","PPBP", "FCGR3A"), 1:40]
+# 
+# # I cannot find GCGR3A but GCGR:
+# grep("GCGR.*", rownames(DN.data), value = TRUE)
+# "GCGR3A" %in% rownames(DN.data) # FALSE
+# "FCGR3A" %in% rownames(DN.data) # TRUE
+```
+
+And in the seurat object
+
+```{r}
+# exclusion_genes <- c("CD3E", "GNLY", "CD14", "FCER1A", "FCGR3A", "PPBP", "LYZ", "CD8A")
+# cat("--- Counts for Exclusion Genes ---\n")
+# 
+# # Check which exclusion genes are actually present in your dataset
+# genes_to_show <- exclusion_genes[exclusion_genes %in% rownames(HB6.a)]
+# 
+#   # Using LayerData for Seurat v5 compatibility
+# exclusion_gene_counts <- LayerData(object = HB6.a, assay = "RNA", layer = "counts")[genes_to_show, , drop = FALSE]
+# 
+#  # You might also want to see a summary, e.g., total counts per gene
+# cat("\n--- Summary (Total Counts Per Gene) ---\n")
+# print(rowSums(exclusion_gene_counts))
+# 
+# # Or how many cells express each gene (count > 0)
+# cat("\n--- Cells Expressing Each Gene (Count > 0) ---\n")
+# print(rowSums(exclusion_gene_counts > 0))
+```
+
+checking before exclusion:
+
+Exclude cells with those genes.
+
+```{r Filtering cells with excluding genes}
+# Assuming your Seurat object is named 'HB6.a'
+# The output object will be 'HB6.axed'
+
+# List the genes you want to exclude (cells with *zero* expression of *all* these will be kept)
+exclusion_genes <- c("CD3E", "GNLY", "CD14", "FCER1A", "FCGR3A", "PPBP", "LYZ", "CD8A")
+
+# Access the count matrix for the exclusion genes
+# Use LayerData for Seurat v5 compatibility
+exclusion_counts <- LayerData(object = HB6.a, assay = "RNA", layer = "counts")[exclusion_genes, , drop = FALSE]
+
+# Identify cells where the sum of counts for *all* these genes is exactly zero
+sum_exclusion_counts_per_cell <- colSums(exclusion_counts)
+cells_to_keep <- names(sum_exclusion_counts_per_cell[sum_exclusion_counts_per_cell == 0])
+
+# Subset the Seurat object to keep only the identified cells
+HB6.axed <- subset(HB6.a, cells = cells_to_keep)
+
+# You can check the number of cells before and after:
+cat("Original number of cells:", ncol(HB6.a), "\n")
+cat("Number of cells after filtering (zero expression of all exclusion genes):", ncol(HB6.axed), "\n")
+
+# 'HB6.axed' now contains cells that had zero expression for all specified exclusion genes.
+```
+
+### Filtering 1 % (axing2)
+
+*cells with total transcript count in the top 1% percentile were removed, as these cells were manually inspected to express transcripts of multiple V gene families per cell, indicating possible cell clumps tagged with the same barcode (it goes from 10004 to 9903 cells).*
+
+```{r filtering 1%}
+# Print the number of cells before filtering
+cat("Number of cells in HB6.axed before filtering (by top 1% total counts):", ncol(HB6.axed), "\n")
+
+# Assuming your Seurat object is named 'HB6.axed'
+
+# Get total RNA counts for each cell
+total_counts <- HB6.axed$nCount_RNA
+
+# Calculate the 99th percentile threshold
+threshold_99th_percentile <- quantile(total_counts, probs = 0.99, na.rm = TRUE)
+
+# Filter out cells with total counts above the 99th percentile
+HB6.axed <- subset(HB6.axed, subset = nCount_RNA <= threshold_99th_percentile)
+
+# HB6.axed is now updated, containing cells below the top 1% for total RNA counts.
+# Print the number of cells after filtering
+# Note: This will print the number of cells in the *updated* HB6.axed object
+cat("Number of cells in HB6.axed after filtering out top 1% by total counts:", ncol(HB6.axed), "\n")
+  
+
+```
+
+# Adding metadata
+
+#### Metadata: Mitocondrial
+
+-   **The percentage of reads that map to the mitochondrial genome**
+    -   Low-quality / dying cells often exhibit extensive mitochondrial contamination
+    -   We calculate mitochondrial QC metrics with the `PercentageFeatureSet()` function, which calculates the percentage of counts originating from a set of features
+    -   We use the set of all genes starting with `MT-` as a set of mitochondrial genes.
+
+```{r mito metadata}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+HB6.axed[["percent.mt"]] <- PercentageFeatureSet(HB6.axed, pattern = "^MT-")
+# Show QC metrics for the first 5 cells
+head(HB6.axed@meta.data, 5)
+```
+
+#### Metadata: Ribosomical
+
+```{r ribosomical metadata}
+# Assuming your Seurat object is named 'HB6.axed'
+# This script calculates the percentage of counts coming from ribosomal genes per cell.
+
+# --- Calculate Percentage of Ribosomal Genes ---
+cat("Calculating percentage of ribosomal genes...\n")
+
+# Define the pattern for ribosomal genes
+# "^RPS" matches genes starting with RPS (Ribosomal Protein Small subunit)
+# "^RPL" matches genes starting with RPL (Ribosomal Protein Large subunit)
+# Combine them with | to match either pattern
+ribosomal_pattern <- "^RPS|^RPL"
+
+# Use PercentageFeatureSet to calculate the percentage of counts for genes matching the pattern
+# The [[ operator adds a new column named 'percent.ribo' to the object metadata
+HB6.axed[["percent.ribo"]] <- PercentageFeatureSet(HB6.axed, pattern = ribosomal_pattern) # Change object name if necessary
+
+cat("Percentage of ribosomal genes calculated and added as 'percent.ribo'.\n")
+
+# --- Show QC metrics including the new column ---
+cat("\nShowing metadata for the first 5 cells:\n")
+print(head(HB6.axed@meta.data, 5))
+
+cat("\nChecking column names in metadata:\n")
+print(colnames(HB6.axed@meta.data))
+
+# Note: PercentageFeatureSet will automatically find genes matching the pattern in your object.
+# If the pattern doesn't match any genes in your object, the 'percent.ribo' column will
+# be added, but all values will likely be 0. You can check the column names using colnames()
+# and the values using head() or summary() to confirm it was added.
+```
+
+#### Metadata: Ig_associated_genes
+
+which genes:
+
+```{r Identifying Ig related genes}
+# Define the list of criteria (including literal names and patterns)
+ig_constant_genes <- c(
+  "IGHM", "IGHD", "IGHE", "IGHA1", "IGHA2",
+  "IGHG1", "IGHG2", "IGHG3", "IGHG4",
+  "IGKC",
+  "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7",
+  "AC233755.1" )
+
+# # --- To make the full list of criteria appear ---
+# cat("The full list of criteria (including patterns) is:\n")
+# print(ig_constant_genes)
+# -------------------------------------------------
+
+# Or finding actual genes in the object that match the patterns:
+genes_matching_patterns <- grep(
+    paste0("^IG[HKL][VDJ]", "|^IGLL"), # combine patterns
+    rownames(HB6.axed),
+    value = TRUE
+ )
+print(genes_matching_patterns)
+```
+
+Now add metadata:
+
+```{r addint metadata: % and count Ig associated genes}
+
+# Assuming your Seurat object is named 'HB6.axed'
+# This script calculates metrics for Immunoglobulin Constant genes
+# PLUS genes matching specified Ig/IGLL regex patterns.
+
+# --- Calculate Metrics for Immunoglobulin Associated Genes (including patterns) ---
+cat("Calculating metrics for Immunoglobulin associated genes (literal + pattern matches):\n")
+
+# Define the list of specific immunoglobulin constant genes (literal names)
+ig_literal_genes <- c(
+    "IGHM", "IGHD", "IGHE", "IGHA1", "IGHA2",
+    "IGHG1", "IGHG2", "IGHG3", "IGHG4",
+    "IGKC",
+    "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7",
+    "AC233755.1")
+
+# Define the regular expression patterns for other Ig/IGLL genes
+ig_regex_patterns <- c( "^IG[HKL][VDJ]", # The original strict Ig VDJ regex
+                        "^IGLL")         # IGLL genes
+
+# 1. Find specific literal genes present in the object
+present_literal_genes <- intersect(ig_literal_genes, rownames(HB6.axed))
+cat("Found", length(present_literal_genes), "of the specified literal Ig genes.\n")
+
+# 2. Find genes in the object that match the regex patterns
+combined_ig_regex <- paste(ig_regex_patterns, collapse = "|")
+genes_matching_ig_regex <- grep(combined_ig_regex, rownames(HB6.axed), value = TRUE)
+cat("Found", length(genes_matching_ig_regex), "genes matching the Ig/IGLL regex patterns.\n")
+
+# 3. Combine the lists and get unique genes to use for calculations
+all_ig_genes_to_use <- unique(c(present_literal_genes, genes_matching_ig_regex))
+cat("Using a total of", length(all_ig_genes_to_use), "unique Ig-associated genes for metrics.\n")
+
+# --- Direct Calculations ---
+
+# 1. Calculate the Percentage of *All Relevant* Immunoglobulin Genes
+HB6.axed[["percent.ig.total"]] <- PercentageFeatureSet(HB6.axed, features = all_ig_genes_to_use)
+
+# 2. Calculate Total Counts of *All Relevant* Immunoglobulin Genes
+counts_matrix <- LayerData(object = HB6.axed, assay = "RNA", layer = "counts")
+# The genes in all_ig_genes_to_use are sourced from rownames(HB6.axed),
+# so they will be present in counts_matrix which shares the same rownames.
+# If all_ig_genes_to_use is empty, ig_associated_counts_matrix will have 0 rows.
+ig_associated_counts_matrix <- counts_matrix[all_ig_genes_to_use, , drop = FALSE]
+# colSums on a 0-row matrix correctly results in a named vector of 0s (one per cell).
+total_counts_ig_associated <- colSums(ig_associated_counts_matrix)
+HB6.axed[["counts.ig.total"]] <- total_counts_ig_associated
+
+
+# --- Review the updated metadata ---
+print(head(HB6.axed@meta.data))
+cat("\nNames of metadata columns:\n")
+print(colnames(HB6.axed@meta.data))
+```
+
+#### Metadata: TCR associated genes
+
+Which genes:
+
+```{r identifying TCR assocaited genes}
+# TCR_matching_patterns <- grep(
+#   paste0("^TR[ABGD][CV]"), # This pattern looks for gene names starting with 'TR'
+#                            # followed by A, B, G, or D, and then by C or V.
+#   rownames(HB6.axed),
+#   value = TRUE)             # This tells grep to return the actual gene names that match
+# print(TCR_matching_patterns) # This should print the gene names found by grep
+```
+
+Adding metadata
+
+```{r addint TCR metadata}
+# Assuming your Seurat object is named 'HB6.axed'
+
+# --- Calculate Metrics for TCR Associated Genes ---
+
+# Define the regular expression pattern for TCR genes
+tcr_regex_pattern <- "^TR[ABGD][CV]" # This pattern looks for gene names starting with 'TR'
+                                     # followed by A, B, G, or D, and then by C or V.
+
+# 1. Find genes in the object that match the regex pattern
+# Use grep to find gene names in the object that match the pattern
+tcr_genes_to_use <- grep(tcr_regex_pattern, rownames(HB6.axed), value = TRUE)
+cat("Found", length(tcr_genes_to_use), "genes matching the TCR regex pattern.\n")
+
+# --- Direct Calculations ---
+
+# 1. Calculate the Percentage of TCR Associated Genes
+HB6.axed[["percent.tcr"]] <- PercentageFeatureSet(HB6.axed, features = tcr_genes_to_use)
+
+# 2. Calculate Total Counts of TCR Associated Genes
+counts_matrix <- LayerData(object = HB6.axed, assay = "RNA", layer = "counts")
+# The genes in tcr_genes_to_use are sourced from rownames(HB6.axed),
+# so they will be present in counts_matrix if found by grep.
+# If tcr_genes_to_use is empty, tcr_associated_counts_matrix will have 0 rows.
+tcr_associated_counts_matrix <- counts_matrix[tcr_genes_to_use, , drop = FALSE]
+# colSums on a 0-row matrix correctly results in a named vector of 0s (one per cell).
+total_counts_tcr_associated <- colSums(tcr_associated_counts_matrix)
+HB6.axed[["counts.tcr"]] <- total_counts_tcr_associated
+
+# --- Review the updated metadata ---
+cat("\nReviewing updated metadata structure:\n")
+print(head(HB6.axed@meta.data))
+cat("\nNames of metadata columns:\n")
+print(colnames(HB6.axed@meta.data))
+```
+
+# `QC. Filtering the raw (non-normalized data)`
+
+#### Option 1 (HB6.a_qc1).
+
+the merged `HB6.a` is a Seurat object , need to be filtered to remove genes detected in fewer than X cells and cells with fewer than y detected genes. (example X=3; y=200). Now filter ( paramater introduce at the start of the script:
+
+```{r filtering option 1: HB6.a_qc1}
+# Assuming your merged Seurat object is named 'HB6.axed'
+
+# 1. Get the raw count data matrix from the 'counts' layer of the 'RNA' assay
+# We need the whole counts matrix to calculate detection across all cells for each gene.
+HB6.axed_counts_matrix <- LayerData(  object = HB6.axed,
+  assay = "RNA",    # Specify the assay
+  layer = "counts")  # Specify the layer for raw counts
+
+# 2. Calculate the number of cells each gene is detected in (count > 0)
+# rowSums(matrix > 0) efficiently counts how many columns (cells) have a value > 0 for each row (gene).
+num_cells_detected_per_gene <- rowSums(HB6.axed_counts_matrix > 0)
+
+# 3. Define the filtering thresholds (already introduced in experimental Parameters tested)
+
+# 4. Identify the names of the genes that meet the min.cells threshold
+# Select gene names where num_cells_detected_per_gene is >= min_cells_threshold
+genes_to_keep_based_on_cells <- names(num_cells_detected_per_gene[num_cells_detected_per_gene >= min_cells_threshold])
+
+# 5. Filter the Seurat object using subset()
+# - The 'subset' argument filters cells based on the metadata column nFeature_RNA.
+# - The 'features' argument filters genes using the list of gene names we just identified.
+
+cat("Number of cells before filtering:", ncol(HB6.axed), "\n")
+cat("Number of genes before filtering:", nrow(HB6.axed), "\n")
+
+HB6.a_qc1 <- subset(  HB6.axed,
+  subset = nFeature_RNA >= min_features_threshold, # Keep cells with >= min_features_threshold
+  features = genes_to_keep_based_on_cells)          # Keep only the genes in this list
+
+cat("\nNumber of cells after filtering:", ncol(HB6.a_qc1), "\n")
+cat("Number of genes after filtering:", nrow(HB6.a_qc1), "\n")
+
+# 'HB6.a_filtered_qc1' is your new Seurat object after applying these filters.
+```
+
+##### Checking HB6.a_qc1 (Seurat Object)
+
+```{r and metadata included}
+HB6.a_qc1
+# head(HB6.a_qc1$nFeature_RNA)
+# head(HB6.a_qc1[['nFeature_RNA']])
+# HB6.a_qc1@meta.data
+# print(colnames(HB6.a_qc1@meta.data))
+```
+
+### General QC metrics
+
+Distribution from metadata
+
+```{r qc metadata}
+# Assuming HB6.a_qc1 is your Seurat object with the full list of metadata columns.
+
+# --- Visualize ALL relevant QC metrics as violin plots ---
+cat("Visualizing all relevant QC metrics as violin plots...\n")
+VlnPlot(HB6.a_qc1, features = c(
+    "nFeature_RNA",      # Standard
+    "nCount_RNA",        # Standard
+    "percent.mt",        # Standard
+    "percent.ribo",      # Calculated ribosomal percentage
+    "percent.ig.total",  # Calculated Ig percentage
+    "counts.ig.total",   # Calculated Ig counts
+    "percent.tcr",       # Calculated TCR percentage
+    "counts.tcr"         # Calculated TCR counts
+), ncol = 4) # Adjusted ncol to fit more plots - might need to increase if needed
+
+
+# --- FeatureScatter plots ---
+# Visualize relationships between metrics
+cat("\nVisualizing relationships between QC metrics using FeatureScatter...\n")
+
+# Standard QC plots
+plot1 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+# Plots involving your new metrics
+
+# nCount_RNA vs percent.ribo
+plot3 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.ribo")
+
+# nCount_RNA vs percent.ig.total
+plot4 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.ig.total")
+
+# nCount_RNA vs percent.tcr
+plot5 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.tcr")
+
+# Relationships between percentages
+plot6 <- FeatureScatter(HB6.a_qc1, feature1 = "percent.mt", feature2 = "percent.ribo")
+plot7 <- FeatureScatter(HB6.a_qc1, feature1 = "percent.ig.total", feature2 = "percent.tcr")
+
+
+# Combine and display the plots
+# You can combine any of the plots using patchwork
+cat("Combining and displaying FeatureScatter plots (example combination)...\n")
+# Example combining some key plots
+combined_scatter_plots <- plot1 + plot2 + plot3 + plot4 + plot5 + plot6 + plot7 # Combine all 7 examples
+print(combined_scatter_plots)
+
+# -------------------No used in the original----------------------------------------------------------
+# --- Using the "Sample" column for grouping (if it represents sample identity) ---
+# If your "Sample" column represents the same groupings as Population, you can use it for grouping plots
+
+# Example: VlnPlot of nCount_RNA grouped by Sample
+# cat("\nVisualizing nCount_RNA grouped by Sample...\n")
+# VlnPlot(HB6.a_qc1, features = "nCount_RNA", group.by = "Sample", ncol = 1)
+
+# Example: VlnPlot of percent.ribo grouped by Sample
+# cat("\nVisualizing percent.ribo grouped by Sample...\n")
+# VlnPlot(HB6.a_qc1, features = "percent.ribo", group.by = "Sample", ncol = 1)
+
+# Example: VlnPlot of percent.ig.total grouped by Sample
+# cat("\nVisualizing percent.ig.total grouped by Sample...\n")
+# VlnPlot(HB6.a_qc1, features = "percent.ig.total", group.by = "Sample", ncol = 1)
+
+# Example: VlnPlot of percent.tcr grouped by Sample
+# cat("\nVisualizing percent.tcr grouped by Sample...\n")
+# VlnPlot(HB6.a_qc1, features = "percent.tcr", group.by = "Sample", ncol = 1)
+```
+
+Metadata distribution according sorting population:
+
+```{r}
+# # Visualize the distribution of nCount_RNA for each original sorted population
+# VlnPlot(HB6.a_qc1, features = "nCount_RNA", group.by = "Population", ncol = 1) + ggtitle("nCount_RNA distribution per Sorted Population")
+# 
+# # Visualize the distribution of nCount_RNA for each original sorted population
+# VlnPlot(HB6.a_qc1, features = "nFeature_RNA", group.by = "Population", ncol = 1) + ggtitle("nFeature_RNA distribution per Sorted Population")
+# 
+# # Your original plot command
+# vln_plot_percent_mt <- VlnPlot(
+#   HB6.a_qc1,
+#   features = "percent.mt",
+#   group.by = "Population", # Ensure this column exists and is what you want to group by
+#   ncol = 1,
+#   pt.size = 0.1 # Optional: adjust point size if you show individual points
+# ) +
+# ggtitle("percent.mt distribution per Sorted Population") +
+# theme(plot.title = element_text(hjust = 0.5)) # Center the title
+# 
+# # Add a horizontal dashed line at y = 12
+# vln_plot_percent_mt_with_line <- vln_plot_percent_mt +
+#   geom_hline(yintercept = 12, linetype = "dashed", color = "red", linewidth = 0.75) # Customize color and linewidth as needed
+# 
+# # Print the plot
+# print(vln_plot_percent_mt_with_line)
+# 
+# # If you want to filter based on this later, you could do something like:
+# # HB6.a_qc1_filtered <- subset(HB6.a_qc1, subset = percent.mt < 12)
+# # cat("Number of cells after filtering out percent.mt >= 12:", ncol(HB6.a_qc1_filtered), "\n")
+# 
+# 
+# # Visualize the distribution of percent.ribo for each original sorted population
+# VlnPlot(HB6.a_qc1, features = "percent.ribo", group.by = "Population", ncol = 1) + ggtitle("percent.ribo distribution per Sorted Population")
+# 
+
+```
+
+```{r}
+# # Assuming HB6.a_qc1 is your Seurat object with the listed metadata columns.
+# # --- Define the list of numeric metadata features to plot ---
+# numeric_metadata_features <- c(
+#     "nCount_RNA",
+#     "nFeature_RNA",
+#     "percent.mt",
+#     "percent.ribo",
+#     "percent.ig.total",
+#     "counts.ig.total",
+#     "percent.tcr",
+#     "counts.tcr")
+# 
+# # --- Define the grouping variable ---
+# grouping_variable <- "Population" # Group by original sample identity as per template
+# 
+# # --- Check if the grouping variable exists ---
+# if (!grouping_variable %in% colnames(HB6.a_qc1@meta.data)) {
+#     stop(paste0("Error: Grouping variable '", grouping_variable, "' (Population) not found in object metadata."))
+# }
+# 
+# # --- Check if the feature variables exist (optional but safe) ---
+# features_present <- numeric_metadata_features %in% colnames(HB6.a_qc1@meta.data)
+# if (any(!features_present)) {
+#     missing_features <- numeric_metadata_features[!features_present]
+#     warning("The following features were not found in metadata and will be skipped:\n", paste(missing_features, collapse = ", "))
+#     numeric_metadata_features <- numeric_metadata_features[features_present] # Only keep present features
+# }
+# 
+# 
+# # --- Generate and print a VlnPlot for each numeric metadata feature, grouped by Population ---
+# cat(paste0("Generating VlnPlots for each numeric metadata feature, grouped by '", grouping_variable, "'...\n"))
+# 
+# if (length(numeric_metadata_features) > 0) {
+#     for (feature in numeric_metadata_features) {
+#         cat(paste0("  Generating VlnPlot for: ", feature, "...\n"))
+# 
+#         # Create the plot title
+#         plot_title <- paste0(feature, " distribution per ", grouping_variable)
+# 
+#         # Generate the VlnPlot for the current feature, grouped by Population
+#         # ncol=1 ensures each plot is in a separate row for easier viewing
+#         vln_plot <- VlnPlot(
+#             object = HB6.a_qc1,
+#             features = feature,         # Plot only the current feature
+#             group.by = grouping_variable, # Group by Population
+#             ncol = 1 # Display plots one per row
+#         ) + ggtitle(plot_title) # Add a descriptive title
+# 
+#         # Print the plot
+#         print(vln_plot)
+#     }
+# } else {
+#     cat("No numeric metadata features found or available to plot.\n")
+# }
+# 
+# cat("\nAll requested VlnPlots generated.\n")
+```
+
+### Analysis Metadata B cell populations
+
+##### Mitocondrial B cells
+
+plot 'nCount_RNA' vs 'percent.mt'. Limit about 12%
+
+```{r}
+# # 1. Extract the data for the two features from the Seurat object's metadata
+# # Access the metadata columns using the $ or [[' column_name ]] syntax
+# feature1_data <- HB6.a_qc1$nCount_RNA # Data for the first feature (nCount_RNA)
+# feature2_data <- HB6.a_qc1$percent.mt # Data for the second feature (percent.mt)
+# 
+# # Optional: Get cell identities if you want to color the points by cluster or other grouping
+# # cell_identities <- Idents(HB6.a_qc1) # Get current identities (e.g., clusters)
+# # cell_orig_ident <- HB6.a_qc$Population # Get original sample identities
+# 
+# # 2. Create a data frame for ggplot2
+# # The row names of the data frame should be the cell barcodes, which match the order of the data vectors
+# plot_data_df <- data.frame(
+#   Feature1 = feature1_data,
+#   Feature2 = feature2_data,
+#   # Add identity column if you want to color points
+#   # Identity = cell_identities,
+#   # Orig_Ident = cell_orig_ident,
+#   row.names = colnames(HB6.a_qc1) # Use cell barcodes as row names
+# )
+# 
+# # 3. Create the scatter plot using ggplot2
+# ggplot_scatter <- ggplot(plot_data_df, aes(x = Feature1, y = Feature2)) +
+#   geom_point(size = 0.5) + # Add points; adjust size as needed
+#   theme_classic() +       # Use a clean theme
+#   xlab("nCount_RNA") +    # Label the x-axis
+#   ylab("percent.mt") +    # Label the y-axis
+#   geom_hline(yintercept = 12, color = "red", linetype = "dashed") # Adjust yintercept as needed
+#   ggtitle("nCount_RNA vs percent.mt (ggplot2)") # Add a plot title
+# 
+# # If you added an Identity column to plot_data_df and want to color by it:
+# # ggplot_scatter <- ggplot(plot_data_df, aes(x = Feature1, y = Feature2, color = Identity)) +
+# #   geom_point(size = 0.5) +
+# #   theme_classic() +
+# #   xlab("nCount_RNA") +
+# #   ylab("percent.mt") +
+# #   ggtitle("nCount_RNA vs percent.mt (ggplot2, colored by Identity)")
+# 
+# 
+# # 4. Print the plot
+# print(ggplot_scatter)
+# 
+# # You can modify this template to plot any two features available in your object's metadata
+# # or even gene expression values extracted using LayerData().
+
+```
+
+plot 'percent.mt' vs 'percent.ribo'. Limit about 20%
+
+```{r}
+# # Assuming your Seurat object is named 'HB6.a_qc1'
+# # This object should contain the 'percent.ribo' and 'percent.mt' metadata columns.
+# 
+# # 1. Extract the data for the two features from the Seurat object's metadata
+# # Access the metadata columns using the $ or [[' column_name ]] syntax
+# 
+# # --- Change: Extract percent.ribo data instead of nCount_RNA ---
+# feature1_data <- HB6.a_qc1$percent.ribo # Data for the first feature (percent.ribo)
+# 
+# # Keep percent.mt data for the second feature
+# feature2_data <- HB6.a_qc1$percent.mt # Data for the second feature (percent.mt)
+# 
+# 
+# # Optional: Get cell identities if you want to color the points by cluster or other grouping
+# # cell_identities <- Idents(HB6.a_qc1) # Get current identities (e.g., clusters)
+# # cell_orig_ident <- HB6.a_qc1$Population # Get original sample identities
+# 
+# # 2. Create a data frame for ggplot2
+# # Use descriptive column names in the data frame
+# plot_data_df <- data.frame(
+#     # --- Change: Use descriptive names matching the data ---
+#     percent.ribo = feature1_data, # Data for the x-axis
+#     percent.mt = feature2_data,   # Data for the y-axis
+#     # Add identity column if you want to color points
+#     # Identity = cell_identities,
+#     # Orig_Ident = cell_orig_ident,
+#     row.names = colnames(HB6.a_qc1)  ) # Use cell barcodes as row names
+# 
+# # 3. Create the scatter plot using ggplot2
+# # Use the descriptive names from the data frame in the aes() mapping
+# ggplot_ribo_mt_scatter <- ggplot(plot_data_df, aes(x = percent.ribo, y = percent.mt)) +
+#     geom_point(size = 0.5) + # Add points; adjust size as needed
+#     theme_classic() +        # Use a clean theme
+# 
+#     # --- Change: Label the x-axis for percent.ribo ---
+#     xlab("percent.ribo") +
+# 
+#     # --- Keep: Label the y-axis for percent.mt ---
+#     ylab("percent.mt") +
+# 
+#     # Add a horizontal line on the y-axis (percent.mt)
+#     # The yintercept is relative to the y-axis
+#     geom_hline(yintercept = 12, color = "red", linetype = "dashed") + # Adjust yintercept as needed for percent.mt
+# 
+#     # --- Change: Update plot title to reflect the new axes ---
+#     ggtitle("percent.ribo vs percent.mt (ggplot2)")
+# 
+# 
+# # If you added an Identity or Orig_Ident column to plot_data_df and want to color by it:
+# # ggplot_ribo_mt_scatter_colored <- ggplot(plot_data_df, aes(x = percent.ribo, y = percent.mt, color = Identity)) +
+# #    geom_point(size = 0.5) +
+# #    theme_classic() +
+# #    xlab("percent.ribo") + # Updated label
+# #    ylab("percent.mt") +   # Updated label
+# #    ggtitle("percent.ribo vs percent.mt (ggplot2, colored by Identity)") # Updated title
+# 
+# 
+# # 4. Print the plot
+# # --- Change: Print the new plot variable ---
+# print(ggplot_ribo_mt_scatter)
+# 
+# # If you created a colored plot:
+# # print(ggplot_ribo_mt_scatter_colored)
+# 
+# 
+# # You can modify this template to plot any two features available in your object's metadata
+# # or even gene expression values extracted using LayerData().
+```
+
+-   Cells in the lower right corner (high `percent.ribo`, low `percent.mt`) represent what are typically considered higher-quality, metabolically active cells.
+-   Cells towards the upper left (lower `percent.ribo`, higher `percent.mt`) are often considered lower-quality or stressed cells, possibly undergoing apoptosis
+
+### FIltering Out cells by Mitocondria,Ribo and uniqueFeatures
+
+In the example below, we visualize QC metrics, and use these to filter cells.
+
+-   We filter cells that have unique feature counts over 2,500 or less than 200
+-   We filter cells that have \>~~5~~ 12 % mitochondrial counts and equal or more than 20 % percent ribo.
+
+```{r}
+cat("Number of cells before filtering:", ncol(HB6.a_qc1), "\n") # 9888 cells, 15692 genes 
+
+# --- Apply subsetting with multiple conditions ---
+HB6.a_qc1 <- subset(HB6.a_qc1, subset = percent.mt < limit_mt & nFeature_RNA <= limit_Feature_RNA & percent.ribo >= limit_ribo)
+
+cat("Number of cells before filtering:", ncol(HB6.a_qc1), "\n")  # 8547 cells, 15692 genes 
+```
+
+Checking after:
+
+```{r}
+# # Visualize the distribution of nCount_RNA for each original sorted population
+# VlnPlot(HB6.a_qc1, features = "nCount_RNA", group.by = "Population", ncol = 1) + ggtitle("nCount_RNA distribution per Sorted Population")
+# 
+# # Visualize the distribution of nCount_RNA for each original sorted population
+# VlnPlot(HB6.a_qc1, features = "nFeature_RNA", group.by = "Population", ncol = 1) + ggtitle("nFeature_RNA distribution per Sorted Population")
+# 
+# # Your original plot command
+# vln_plot_percent_mt <- VlnPlot(
+#   HB6.a_qc1,
+#   features = "percent.mt",
+#   group.by = "Population", # Ensure this column exists and is what you want to group by
+#   ncol = 1,
+#   pt.size = 0.1 # Optional: adjust point size if you show individual points
+# ) +
+# ggtitle("percent.mt distribution per Sorted Population") +
+# theme(plot.title = element_text(hjust = 0.5)) # Center the title
+# 
+# # Add a horizontal dashed line at y = 12
+# vln_plot_percent_mt_with_line <- vln_plot_percent_mt +
+#   geom_hline(yintercept = 12, linetype = "dashed", color = "red", linewidth = 0.75) # Customize color and linewidth as needed
+# 
+# # Print the plot
+# print(vln_plot_percent_mt_with_line)
+# 
+# # If you want to filter based on this later, you could do something like:
+# # HB6.a_qc1_filtered <- subset(HB6.a_qc1, subset = percent.mt < 12)
+# # cat("Number of cells after filtering out percent.mt >= 12:", ncol(HB6.a_qc1_filtered), "\n")
+# 
+# 
+# # Visualize the distribution of percent.ribo for each original sorted population
+# VlnPlot(HB6.a_qc1, features = "percent.ribo", group.by = "Population", ncol = 1) + ggtitle("percent.ribo distribution per Sorted Population")
+```
+
+## Normalizing the data
+
+[*Gene counts were log-normalized*]{.underline}
+
+After removing unwanted cells from the dataset, the next step is to normalize the data. The primary goal of normalization in single-cell RNA-seq is to **account for differences in sequencing depth (or library size) between cells.** For each cell, the count of every gene (expression) is divided by the total number of unique molecular identifiers (UMIs) or read counts detected. This converts raw counts into proportions or frequencies.
+
+We employed a [global-scaling normalization method "LogNormalize"]{.underline} that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. Log-transformation reduces this mean-variance relationship and mades data more normally distributed. In Seurat v5, Normalized values are stored in `HB6.a_qc1[["RNA"]]$data`, indicating the 'data' layer within the 'RNA' assay.
+
+```{r normalize}
+HB6.a_qc1 <- NormalizeData(HB6.a_qc1, normalization.method = "LogNormalize", scale.factor = 1e4)
+```
+
+## Find variable Features: Selection of highly variable features
+
+We next calculate a subset of features that exhibit high cell-to-cell variation in the dataset (i.e, they are highly expressed in some cells, and lowly expressed in others). We and [others](https://www.nature.com/articles/nmeth.2645) have found that focusing on these genes in downstream analysis helps to highlight biological signal in single-cell datasets.
+
+Our procedure in Seurat is described in detail [here](https://doi.org/10.1016/j.cell.2019.05.031), and improves on previous versions by directly modeling the mean-variance relationship inherent in single-cell data, and is implemented in the `FindVariableFeatures()` function. By default, we return **2,000 features per datase**t. These will be used in downstream analysis, like PCA.
+
+###### Before pruning Ig and TCR related genes
+
+```{r var_features, fig.height=5, fig.width=10}
+HB6.a_qc1 <- FindVariableFeatures(HB6.a_qc1, selection.method = 'vst', nfeatures = nfeat)
+
+# Identify the 80 most highly variable genes
+top80 <- head(VariableFeatures(HB6.a_qc1), 80)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(HB6.a_qc1)
+plot2 <- LabelPoints(plot = plot1, points = top80, repel = TRUE, max.overlaps = Inf)
+plot2
+
+```
+
+*The following genes were removed from the list of variably expressed genes in order to prevent downstream dimensionality reduction and clustering to reflect individual/clonotype specific gene usage: all Ig V, D, J genes (extracted using the regular expression [regex] “IG[HKL][VDJ]”), Ig constant genes (IGHM, IGHD, IGHE, IGHA[1-2], IGHG[1-4], IGKC, IGLC[1-7], and AC233755.1 [which encodes IGHV4-38- 2]), IGLL genes, T-cell receptor genes (regex “TR[ABGD][CV]”).*
+
+# FILTERING IG and TCR genes (HB6.a_qc1)
+
+Incluidng all the rest selected : *all Ig V, D, J genes (extracted using the regular expression [regex] “IG[HKL][VDJ]”), Ig constant genes (IGHM, IGHD, IGHE, IGHA[1-2], IGHG[1-4], IGKC, IGLC[1-7], and AC233755.1 [which encodes IGHV4-38- 2]), IGLL genes, T-cell receptor genes (regex “TR[ABGD][CV]”) (100+ genes were taken out of analysis). First a made a copy of the unfiltered:*
+
+```{r}
+# HB6.a_qc2 has original variable features from FindVariableFeatures()
+HB6.a_qc2 <- HB6.a_qc1
+cat("Created HB6.a_qc2, a copy of HB6.a_qc1 before custom variable feature filtering.\n")
+cat("Number of variable features in HB6.a_qc2:", length(VariableFeatures(HB6.a_qc2)), "\n")
+```
+
+Doing the filtering according to parameters introduced at the beggining:
+
+```{r}
+cat("Initial number of variable features in HB6.a_qc1:", length(VariableFeatures(HB6.a_qc1)), "\n")
+
+# --- Define Gene Sets ---
+
+# Explicit list of Ig constant genes and other specific genes
+ig_constant_genes_list <- c(
+  "IGHM", "IGHD", "IGHE", "IGHA1", "IGHA2",
+  "IGHG1", "IGHG2", "IGHG3", "IGHG4",
+  "IGKC",
+  "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7",
+  "AC233755.1" # Specific gene mentioned (encodes IGHV4-38-2)
+  # Add other specific genes here if needed, e.g., "JCHAIN", "B2M", "VPREB1"
+)
+# Convert to a set for efficient lookup
+ig_constant_genes_set <- as.character(unique(ig_constant_genes_list))
+
+# Regular expression patterns for different gene categories
+# Anchored to the start (^) to avoid partial matches
+ig_vdj_regex <- "^IG[HKL][VDJ]" # Ig V(D)J genes (Heavy, Kappa, Lambda)
+igll_regex <- "^IGLL"          # IGLL genes
+tcr_regex <- "^TR[ABGD][CV]"   # TCR V/C genes (Alpha, Beta, Gamma, Delta)
+
+
+# >>>>>> SET YOUR CLUSTERING SCENARIO HERE <<<<<<
+
+
+# --- Function to Filter Variable Features (Updated to show deleted genes) ---
+
+#' Filter Variable Features by Specified Gene Sets
+
+#' @return A character vector of filtered variable features.
+#' @import Seurat # Assuming Seurat is loaded if VariableFeatures() is used
+filter_variable_features_by_gene_sets <- function(
+  seurat_object,
+  exclude_sets = c(),
+  ig_constant_genes_set,
+  ig_vdj_regex,
+  igll_regex,
+  tcr_regex
+) {
+
+  cat("\n--- Identifying Genes for Removal ---\n")
+  if (length(exclude_sets) > 0) {
+    cat("Excluding sets:", paste(exclude_sets, collapse = ", "), "\n")
+  } else {
+    cat("No gene sets specified for exclusion.\n")
+  }
+
+  # Get the current list of variable features
+  current_variable_genes <- VariableFeatures(seurat_object)
+  cat("Number of variable features before filtering:", length(current_variable_genes), "\n")
+
+  # Initialize list of genes to remove
+  genes_to_remove <- character(0)
+
+  # --- Identify genes to remove based on exclude_sets ---
+
+  # Exclude Ig VDJ genes
+  if ("ig_vdj" %in% exclude_sets) {
+    vdj_matches <- grep(ig_vdj_regex, current_variable_genes, value = TRUE)
+    genes_to_remove <- c(genes_to_remove, vdj_matches)
+    cat("Identified", length(vdj_matches), "Ig VDJ genes for removal (matching regex:", ig_vdj_regex, ").\n")
+  }
+
+  # Exclude Ig constant genes
+  if ("ig_constant" %in% exclude_sets) {
+    # Find constant genes that are also in the current variable features
+    constant_matches <- intersect(current_variable_genes, ig_constant_genes_set)
+    genes_to_remove <- c(genes_to_remove, constant_matches)
+    cat("Identified", length(constant_matches), "Ig constant/specific genes for removal (from provided list).\n")
+  }
+
+  # Exclude IGLL genes
+  if ("igll" %in% exclude_sets) {
+    igll_matches <- grep(igll_regex, current_variable_genes, value = TRUE)
+    genes_to_remove <- c(genes_to_remove, igll_matches)
+    cat("Identified", length(igll_matches), "IGLL genes for removal (matching regex:", igll_regex, ").\n")
+  }
+
+  # Exclude TCR genes
+  if ("tcr" %in% exclude_sets) {
+    tcr_matches <- grep(tcr_regex, current_variable_genes, value = TRUE)
+    genes_to_remove <- c(genes_to_remove, tcr_matches)
+    cat("Identified", length(tcr_matches), "TCR genes for removal (matching regex:", tcr_regex, ").\n")
+  }
+
+  # Ensure uniqueness in the list of genes to remove
+  genes_to_remove <- unique(genes_to_remove)
+
+  cat("\nTotal unique genes identified for removal:", length(genes_to_remove), "\n")
+  
+  # >>>>> ADDED SECTION TO LIST THE REMOVED GENES <<<<<
+  if (length(genes_to_remove) > 0) {
+    cat("List of unique genes removed from VariableFeatures:\n")
+    # To avoid overly long output, print a few and then the total, or print all if not too many
+    if (length(genes_to_remove) <= 50) { # Arbitrary threshold for printing all
+      cat(paste(genes_to_remove, collapse = ", "), "\n")
+    } else {
+      cat(paste(head(genes_to_remove, 50), collapse = ", "), "...\n")
+      cat("(Showing first 50 out of", length(genes_to_remove), "genes removed. Full list is in 'genes_to_remove' if captured.)\n")
+    }
+  }
+  # >>>>> END OF ADDED SECTION <<<<<
+
+  # --- Perform Filtering ---
+  if (length(genes_to_remove) > 0) {
+    # Create the new list of variable features by excluding the identified genes
+    filtered_variable_genes <- setdiff(current_variable_genes, genes_to_remove)
+    cat("Number of variable features after filtering:", length(filtered_variable_genes), "\n")
+  } else {
+    cat("No genes were specified for removal or none matched the variable features.\n")
+    filtered_variable_genes <- current_variable_genes # Keep all if none to remove
+    cat("Number of variable features remains:", length(filtered_variable_genes), "\n")
+  }
+
+  cat("--- Filtering Identification Complete ---\n")
+  return(filtered_variable_genes)
+}
+
+
+cat(paste0("\n### Running Analysis Scenario: ", scenario_name, " ###\n"))
+
+# --- 1. Filter Variable Features based on the chosen scenario ---
+
+# Get the filtered list of variable features
+# Ensure HB6.a_qc1 exists and is a Seurat object before this point
+if (!exists("HB6.a_qc1") || !inherits(HB6.a_qc1, "Seurat")) {
+  stop("Seurat object 'HB6.a_qc1' not found or is not a Seurat object. Please load your data.")
+}
+
+filtered_vars <- filter_variable_features_by_gene_sets(
+  seurat_object = HB6.a_qc1, 
+  exclude_sets = exclude_sets_for_scenario,
+  ig_constant_genes_set = ig_constant_genes_set,
+  ig_vdj_regex = ig_vdj_regex,
+  igll_regex = igll_regex,
+  tcr_regex = tcr_regex
+)
+
+# Update the VariableFeatures in the original object
+VariableFeatures(HB6.a_qc1) <- filtered_vars
+cat("Variable features updated in the working object: HB6.a_qc1.\n")
+cat("New number of variable features:", length(VariableFeatures(HB6.a_qc1)), "\n")
+
+```
+
+Other genes:
+
+AC233755.2 : Group enriched (naive B-cell, memory B-cell) : <https://v20.proteinatlas.org/ENSG00000277856-AC233755.2>
+
+JCHAIN: Group enriched (B-cells, : <https://v20.proteinatlas.org/ENSG00000132465-JCHAIN>
+
+TCL1A: <https://v20.proteinatlas.org/ENSG00000100721-TCL1A/celltype>
+
+VPREB1 <https://v20.proteinatlas.org/ENSG00000169575-VPREB1>
+
+```{r}
+# Identify the 50 most highly variable genes
+top50 <- head(VariableFeatures(HB6.a_qc1), 50)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(HB6.a_qc1)
+plot2 <- LabelPoints(plot = plot1, points = top50, repel = TRUE)
+plot2
+```
+
+Which are the most 100 variable genes? Get the list of all variable features identified.:
+
+```{r}
+# This list is automatically ordered from most variable to least variable.
+all_variable_genes <- VariableFeatures(HB6.a_qc1)
+
+# Select the first 200 genes from the ordered list using head()
+top_100_variable_genes <- head(all_variable_genes, 200)
+
+# Print the list of the top 200 variable genes
+cat("Top", 100, "most variable genes:\n")
+print(top_100_variable_genes)
+```
+
+*Note: If you have removed Ig and TCR-associated genes from the `VariableFeatures` list of your Seurat object (`HB6.a_qc1`), then those specific genes will **not** be considered during the `ScaleData` step.*
+
+# Data Scaling
+
+## General Scaling
+
+Next, we apply a linear transformation ('scaling') that is a standard pre-processing step prior to dimensional reduction techniques like PCA. The `ScaleData()` function:
+
+-   Shifts the expression of each gene, so that the mean expression across cells is 0
+-   Scales the expression of each gene, so that the variance across cells is 1
+    -   This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+-   The results of this are stored in `HB6.a_qc1[["RNA"]]$scale.data`
+-   By default, only variable features are scaled.
+-   You can specify the `features` argument to scale additional features
+
+`{# {r regress, results='hide'} # all.genes <- rownames(HB6.a_qc1) # HB6.a_qc1 <- ScaleData(HB6.a_qc1, features = all.genes)`
+
+```{r}
+# HB6.a_qc2 has original variable features from FindVariableFeatures()
+HB6.a_qc2 <- HB6.a_qc1
+cat("Created HB6.a_qc2, a copy of HB6.a_qc1 before scaling.\n")
+```
+
+## **Removing unwanted sources of variation through scaling (all genes)**
+
+In Seurat, we also use the `ScaleData()` function to remove unwanted sources of variation from a single-cell dataset. For example, we could 'regress out' heterogeneity associated with (for example) [cell cycle stage](https://satijalab.org/seurat/articles/cell_cycle_vignette), or mitochondrial contamination i.e.:
+
+Scaling all genes can be computationally intensive for large datasets.Often, you only need to scale the variable features used for PCA. But for HB6, `ScaleData()` **defaults to using the genes stored in `VariableFeatures(object).`**
+
+```{r regress, results='hide'}
+# Assuming HB6.a_qc1 is your Seurat object after normalization,
+# variable feature identification, and calculation of the %/count metrics.
+
+# Define the variables you want to regress out at section: Experimental Parameters Been tested
+
+# Run ScaleData, specifying the variables to regress
+HB6.a_qc1 <- ScaleData(object = HB6.a_qc1, vars.to.regress = variables_to_regress)
+# You can also specify 'features' here if you only want to scale/regress a subset of genes (e.g., VariableFeatures(HB6.a_qc1))
+# Example scaling only variable features:
+# features = VariableFeatures(HB6.a_qc1)
+
+cat("ScaleData complete. Variation from", paste(variables_to_regress, collapse = ", "), "has been regressed out.\n")
+```
+
+*Note: I didn't use `ScaleData()` function to remove unwanted sources of variation from a single-cell dataset. For example, we could 'regress out' heterogeneity associated with (for example) [cell cycle stage](https://satijalab.org/seurat/articles/cell_cycle_vignette), or mitochondrial contamination i.e.:*
+
+# CLUSTERING
+
+## Perform linear dimensional reduction
+
+Next we perform PCA on the scaled data. By default, only the previously determined variable features are used as input, but can be defined using `features` argument if you wish to choose a different subset (if you do want to use a custom subset of features, make sure you pass these to `ScaleData` first).
+
+For the first principal components, Seurat outputs a list of genes with the most positive and negative loadings, representing modules of genes that exhibit either correlation (or anti-correlation) across single-cells in the dataset.
+
+```{r pca,results='hide'}
+HB6.a_qc1<- RunPCA(HB6.a_qc1, features = VariableFeatures(object = HB6.a_qc1))
+```
+
+Seurat provides several useful ways of visualizing both cells and features that define the PCA, including `VizDimReduction()`, `DimPlot()`, and `DimHeatmap()`
+
+```{r pca_viz, fig.height=8, fig.width=10, message=TRUE}
+# Examine and visualize PCA results a few different ways
+#print(HB6.a_qc1[['pca']], dims = 1:5, nfeatures = 5)
+VizDimLoadings(HB6.a_qc1, dims = 1:2, reduction = 'pca')
+
+# Color the PCA plot by the 'Population' metadata column
+DimPlot(HB6.a_qc1, reduction = 'pca', group.by = 'Population')
+
+# If you want to keep the legend to see which color corresponds to which Population,
+# you should remove the '+ NoLegend()' part:
+# DimPlot(HB6.a_qc1, reduction = 'pca', group.by = 'Population')
+```
+
+## Determine the 'dimensionality' of the dataset
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a 'metafeature' that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset. However, how many components should we choose to include? 10? 20? 100?
+
+An alternative heuristic method generates an 'Elbow plot': a ranking of principle components based on the percentage of variance explained by each one (`ElbowPlot()` function). In this example, we can observe an 'elbow' around PC9-10, suggesting that the majority of true signal is captured in the first 10 PCs.
+
+```{r elbow_plot, fig.height=6, fig.width=10}
+ElbowPlot(HB6.a_qc1) + 
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "red")
+```
+
+*Principal Component Analysis (PCA) was then performed on this pruned gene list. Surveying the first 50 principal components, the proportion of variance explained plateaued at \~ 1.5% from the 15th PC onwardsPrincipal Component Analysis (PCA) was then performed on this pruned gene list. Surveying the first 50 principal components, the proportion of variance explained plateaued at \~ 1.5% from the 15th PC onwards*
+
+## KNN Clustering of the cells
+
+Seurat applies a graph-based clustering approach, building upon initial strategies in ([Macosko *et al*](http://www.cell.com/abstract/S0092-8674(15)00549-8)). Importantly, the *distance metric* which drives the clustering analysis (based on previously identified PCs) remains the same. However, our approach to partitioning the cellular distance matrix into clusters has dramatically improved. Our approach was heavily inspired by recent manuscripts which applied graph-based clustering approaches to scRNA-seq data [[SNN-Cliq, Xu and Su, Bioinformatics, 2015]](http://bioinformatics.oxfordjournals.org/content/early/2015/02/10/bioinformatics.btv088.abstract) and CyTOF data [[PhenoGraph, Levine *et al*., Cell, 2015]](http://www.ncbi.nlm.nih.gov/pubmed/26095251). Briefly, these methods embed cells in a graph structure - for example a K-nearest neighbor (KNN) graph, with edges drawn between cells with similar feature expression patterns, and then attempt to partition this graph into highly interconnected 'quasi-cliques' or 'communities'.
+
+As in PhenoGraph, we first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). This step is performed using the `FindNeighbors()` function, and takes as input the previously defined dimensionality of the dataset (first 10 PCs).
+
+To cluster the cells, we next apply modularity optimization techniques such as the Louvain algorithm (default) or SLM [[SLM, Blondel *et al*., Journal of Statistical Mechanics]](http://dx.doi.org/10.1088/1742-5468/2008/10/P10008), to iteratively group cells together, with the goal of optimizing the standard modularity function. The `FindClusters()` function implements this procedure, and contains a resolution parameter that sets the 'granularity' of the downstream clustering, with increased values leading to a greater number of clusters. We find that setting this parameter between 0.4-1.2 typically returns good results for single-cell datasets of around 3K cells. Optimal resolution often increases for larger datasets. The clusters can be found using the `Idents()` function.
+
+T*o define cell clusters, a shared nearest neighbor (SNN) graph was constructed using Seurat:: FindNeighbors based on the first 14 PCs, and cell clusters were defined on the SNN graph with Seurat::FindClusters (resolution parameter = 1). Clusters were named according to manual inspection for their composition in terms of the original FACSdefined populations. Differential expression was examined using the Wilcoxon rank-sum test provided in Seurat::FindMarkers. Analysis for the additional samples followed the same procedure, retaining principal components that explained at least 1.5% of the variance.*
+
+```{r clustering}
+HB6.a_qc1 <- FindNeighbors(HB6.a_qc1, dims = 1:dimen)
+HB6.a_qc1 <- FindClusters(HB6.a_qc1, resolution = resol)
+
+# Look at cluster IDs of the first 5 cells
+#head(Idents(HB6.a_qc1), 5)
+```
+
+## Run non-linear dimensional reduction (UMAP/tSNE)
+
+Seurat offers several non-linear dimensional reduction techniques, such as tSNE and UMAP, to visualize and explore these datasets. The goal of these algorithms is to learn underlying structure in the dataset, in order to place similar cells together in low-dimensional space. Therefore, cells that are grouped together within graph-based clusters determined above should co-localize on these dimension reduction plots.
+
+While we and others have routinely found 2D visualization techniques like tSNE and UMAP to be valuable tools for exploring datasets, all visualization techniques have limitations, and cannot fully represent the complexity of the underlying data. In particular, these methods aim to preserve local distances in the dataset (i.e. ensuring that cells with very similar gene expression profiles co-localize), but often do not preserve more global relationships. We encourage users to leverage techniques like UMAP for visualization, but to avoid drawing biological conclusions solely on the basis of visualization techniques.
+
+*Uniform Manifold Approximation and Projection (UMAP) was performed based on the first 14 PCs, using the implementation in the python umap-learn package with correlation as the distance measure in the PC space. UMAP projections were produced on both two-dimensional and threedimensional spaces.*
+
+```{r umap}
+HB6.a_qc1 <- RunUMAP(HB6.a_qc1, dims = 1:dimen)
+```
+
+## Clustering representation
+
+```{r}
+# Assuming HB6.a_qc1 is your Seurat object
+# Rename cluster 5 to "Transitional"
+# HB6.a_qc1 <- RenameIdents(HB6.a_qc1, `5` = "Transitional", `2` = "Naive", )
+
+# Or check the unique identities
+levels(Idents(HB6.a_qc1))
+
+# To verify the change, you can plot the UMAP again with the new labels
+DimPlot(HB6.a_qc1, reduction = 'umap', group.by ="seurat_clusters", label = TRUE) + NoLegend()
+
+# Assuming your filtered Seurat object with UMAP calculated is named 'HB6.a_qc1'
+# You can also add labels for the original sample names if you like (though often less clear than cluster labels)
+DimPlot(object = HB6.a_qc1, reduction = "umap", group.by = "Population", label = TRUE, repel = TRUE) + NoLegend()
+
+# To also show the standard cluster labels alongside the original sample coloring,
+# you could use the 'split.by' argument or create separate plots.
+# Example: Plot UMAP colored by original identity AND split by cluster (if clustering is done)
+DimPlot(object = HB6.a_qc1, reduction = "umap", group.by = "Population", split.by = "seurat_clusters")
+```
+
+## Graph for purity each cluster (I)
+
+Proper column representation:
+
+```{r}
+# This script chunk assumes the following are ALREADY handled:
+# 1. Required libraries (ggplot2, dplyr, viridis, Seurat) are loaded.
+# 2. All necessary parameters (e.g., scenario_name, min_cells_threshold, etc.) are defined in the environment.
+# 3. The Seurat object 'HB6.a_qc1' is loaded and correctly populated.
+
+# --- Core Data Processing for Plot ---
+# Directly uses the pre-loaded 'HB6.a_qc1' Seurat object.
+cluster_origin_counts <- table(Idents(HB6.a_qc1), HB6.a_qc1$Population)
+
+# Convert counts to proportions per cluster
+cluster_origin_prop <- prop.table(cluster_origin_counts, margin = 1)
+cluster_origin_df <- as.data.frame(cluster_origin_prop, stringsAsFactors = FALSE)
+colnames(cluster_origin_df) <- c("Cluster", "Origin", "Proportion")
+
+# Ensure Cluster is a factor with levels in the order they appear in the table
+cluster_origin_df$Cluster <- factor(cluster_origin_df$Cluster, levels = rownames(cluster_origin_counts))
+
+# Determine the most prevalent origin for each cluster
+most_prevalent_origin_for_cluster <- apply(cluster_origin_counts, 1, function(counts_per_cluster) {
+  names(which.max(counts_per_cluster))
+})
+# Ensure it's a named vector matching cluster levels
+names(most_prevalent_origin_for_cluster) <- rownames(cluster_origin_counts)
+
+# Calculate purity (proportion of the most prevalent origin) for each cluster
+purity_per_cluster <- sapply(levels(cluster_origin_df$Cluster), function(cl_id) {
+  max(cluster_origin_prop[cl_id, ], na.rm = TRUE)
+})
+names(purity_per_cluster) <- levels(cluster_origin_df$Cluster)
+
+# Order cluster levels by purity (descending) for the plot
+ordered_cluster_levels <- names(sort(purity_per_cluster, decreasing = TRUE, na.last = TRUE))
+
+# Apply this new order to the 'Cluster' column for plotting
+cluster_origin_df$Cluster_Ordered <- factor(cluster_origin_df$Cluster, levels = ordered_cluster_levels)
+
+# Create the new x-axis labels based on the ordered clusters
+new_x_axis_labels_ordered <- paste0(
+  ordered_cluster_levels,
+  " (",
+  most_prevalent_origin_for_cluster[ordered_cluster_levels], # Index by the ordered levels
+  ")"
+)
+
+# Prepare data for optional direct proportion labels (y-positions)
+# This section uses dplyr pipes (ensure dplyr was loaded previously)
+cluster_origin_df_for_labels <- cluster_origin_df %>%
+  filter(!is.na(Cluster_Ordered) & Proportion > 0) %>% # Ensure clusters are valid and have some proportion
+  arrange(Cluster_Ordered, Origin) %>%
+  group_by(Cluster_Ordered) %>%
+  mutate(
+    cumulative_proportion = cumsum(Proportion),
+    label_y_position = cumulative_proportion - (Proportion / 2)
+  ) %>%
+  ungroup()
+
+# # --- Construct Plot Subtitle (using pre-defined parameters from the environment) ---
+# parameter_subtitle <- paste0(
+#   "Analysis Parameters:\n",
+#   "Initial Filtering: Min.cells/feature = ", min_cells_threshold,
+#   ", Min.features/cell = ", min_features_threshold, "\n",
+#   "QC Filtering: %MT < ", limit_mt,
+#   ", Features/cell < ", limit_Feature_RNA,
+#   ", %Ribo > ", limit_ribo, "\n",
+#   "Regressed Variables: ", paste(variables_to_regress, collapse = ", "), "\n",
+#   "Scenario: ", scenario_name, "\n",
+#   "Clustering: PCA Dims = ", dimen, ", Resolution = ", resol
+# )
+
+# --- Generate the Plot ---
+# This section uses ggplot2 functions (ensure ggplot2 and viridis were loaded previously)
+plot_composition <- ggplot(cluster_origin_df_for_labels, aes(x = Cluster_Ordered, y = Proportion, fill = Origin)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.3, width = 0.9) +
+  scale_fill_viridis_d(option = "D") +
+  labs(
+    title = "Purity and Composition of Clusters by Original Identity",
+    # subtitle = parameter_subtitle,
+    x = "Cluster (Most Prevalent Origin) - Ordered by Purity",
+    y = "Proportion of Cells",
+    fill = "Original Identity"
+  ) +
+  scale_x_discrete(labels = new_x_axis_labels_ordered) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 9, face = "italic", hjust = 0.5, margin = margin(b = 10)),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 12, margin = margin(r = 10)),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 9),
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+# Print the plot
+print(plot_composition)
+```
+
+##### Save rds
+
+You can save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+
+```{r saveobject, eval=FALSE}
+# saveRDS(HB6.a_qc1, file = "./HB6.a_qc1_min_cells_25.rds") # Current working directory 
+```
+
+### QC Metrics of Clusters
+
+```{r qc}
+
+#Visualize QC metrics as a violin plot
+# VlnPlot(HB6.a_qc1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+# 
+# # FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+# 
+# plot1 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+# plot2 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+# plot1 + plot2
+```
+
+fds
+
+```{r}
+# Visualize QC metrics including the new Ig and TCR ones as violin plots
+# VlnPlot(HB6.a_qc1, features = c(
+# 
+#     "percent.ig.total",    # Your new Ig percentage
+#     "counts.ig.total",     # Your new Ig counts
+#     "percent.tcr",         # Your new TCR percentage
+#     "counts.tcr"           # Your new TCR counts
+# ), ncol = 4) # Adjusted ncol to potentially fit more plots nicely
+```
+
+```{r}
+# # FeatureScatter using the new metadata columns
+# 
+# # Example 1: nCount_RNA vs percent.ig.total
+# plot3 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.ig.total")
+# 
+# # Example 2: nCount_RNA vs percent.tcr
+# plot4 <- FeatureScatter(HB6.a_qc1, feature1 = "nCount_RNA", feature2 = "percent.tcr")
+# 
+# # Example 3: percent.ig.total vs percent.tcr (Often useful for identifying B vs T cells)
+# plot5 <- FeatureScatter(HB6.a_qc1, feature1 = "percent.ig.total", feature2 = "percent.tcr")
+# 
+# # Display the new plots (you can combine them similar to plot1 + plot2)
+# plot3
+# plot4
+# plot5
+# # Or combine them:
+# #plot3 + plot4 + plot5
+
+```
+
+## Entropy Score
+
+[Interpretation:]{.underline}
+
+**Weighted Average Entropy**: Average sample mixedness per cell across all clusters.
+
+  - Lower values (closer to 0) indicate clusters are, on average, less mixed with respect to Population.
+
+```{r}
+# citation("entropy")
+```
+
+**AMI Score:** Agreement between clustering and Population labels (range typically 0 to 1, higher is more agreement).
+
+  - Lower values (closer to 0) suggest the clustering is more independent of Population (often desired after batch correction).
+
+  - Higher values (closer to 1) suggest the clustering strongly reflects Population (could be biological difference or batch effect).
+
+These scores can help compare different clustering runs (e.g., different resolutions or batch correction approaches).
+
+#### Overall entropy scores
+
+```{r overall entropy scores}
+
+# --- Construct the Title String with Parameters ---
+# Assumes all parameter variables are ALREADY DEFINED in your R environment.
+parameter_title <- paste0(
+  "Overall Entropy and AMI Scores for Clustering of HB6.a_qc1\n",
+  "----------------------------------------------------------\n",
+  "Analysis Parameters for Input Seurat Object & Clustering:\n",
+  "  Initial Filtering: Min.cells/feature = ", min_cells_threshold,
+  ", Min.features/cell = ", min_features_threshold, "\n",
+  "  QC Filtering: %MT < ", limit_mt,
+  ", Features/cell < ", limit_Feature_RNA,
+  ", %Ribo > ", limit_ribo, "\n", # Note: your script uses > for limit_ribo
+  "  Regressed Variables: ", paste(variables_to_regress, collapse = ", "), "\n",
+  "  Scenario: ", scenario_name, "\n",
+  "  Clustering Input: PCA Dims = ", dimen, ", Resolution = ", resol, "\n",
+  "----------------------------------------------------------\n")
+
+# --- Print the Title ---
+cat(parameter_title)
+
+# --- Load necessary libraries ---
+# Assuming these are loaded if specified by user.
+library(entropy) # For entropy calculation
+library(aricode) # For Adjusted Mutual Information
+
+# --- Seurat object 'HB6.a_qc1' and its metadata are assumed to exist and be correctly formatted. ---
+
+cat("Calculating overall entropy scores for the clustering run on HB6.a_qc1...\n")
+
+# 1. Get the cluster assignments and original sample identities
+cluster_identities <- HB6.a_qc1$seurat_clusters
+original_samples <- HB6.a_qc1$Population
+
+# 2. Calculate individual entropy for each cluster
+samples_split_by_cluster <- split(original_samples, cluster_identities)
+# This line pre-filters empty groups. If kept, the sapply below won't process empty clusters.
+# If this line were also removed, and an empty cluster was passed to sapply, table() on it would be empty.
+samples_split_by_cluster <- samples_split_by_cluster[sapply(samples_split_by_cluster, length) > 0]
+
+individual_entropy_per_cluster <- sapply(samples_split_by_cluster, function(samples_in_cluster) {
+  # Internal check for empty samples_in_cluster removed as per request.
+  # Directly proceeding with calculation.
+  freq_table <- table(samples_in_cluster)
+  prob_dist <- prop.table(freq_table)
+  entropy_value <- entropy::entropy(prob_dist, method = "ML", unit = "log")
+  return(entropy_value)
+})
+
+# 3. Calculate the number of cells in each *non-empty* cluster
+clusters_present_for_entropy <- names(individual_entropy_per_cluster)
+cluster_counts <- table(factor(cluster_identities))[clusters_present_for_entropy]
+
+# --- Calculate Weighted Average Entropy (internal conditional logic removed) ---
+# Directly calculates; will error if inputs are unsuitable (e.g., empty individual_entropy_per_cluster or sum(cluster_counts) is 0/NA)
+weighted_avg_entropy <- weighted.mean(individual_entropy_per_cluster, cluster_counts, na.rm = TRUE) # na.rm kept for weighted.mean
+cat("\nWeighted Average Entropy (Population per cluster):\n")
+print(weighted_avg_entropy)
+
+# --- Calculate Adjusted Mutual Information (AMI) (internal conditional logic removed) ---
+# Directly calculates; will error if lengths mismatch or vectors are empty.
+ami_score <- aricode::AMI(cluster_identities, original_samples)
+cat("\nAdjusted Mutual Information (AMI) between clusters and Population:\n")
+print(ami_score)
+```
+
+#### Overall entropy scores (filtered)
+
+Corrrected score of less than 2.5%:
+
+```{r score adjusted to less than 2.5 % of cells}
+
+# --- Construct the Title String with Parameters ---
+# This section assumes all general analysis parameter variables are ALREADY DEFINED.
+parameter_title_filtered <- paste0(
+  "Overall Entropy and AMI Scores for HB6.a_qc1 (Clusters Filtered by Size)\n",
+  "------------------------------------------------------------------------\n",
+  "General Analysis Parameters (for input Seurat Object & Clustering):\n",
+  "  Initial Filtering: Min.cells/feature = ", min_cells_threshold,
+  ", Min.features/cell = ", min_features_threshold, "\n",
+  "  QC Filtering: %MT < ", limit_mt,
+  ", Features/cell < ", limit_Feature_RNA,
+  ", %Ribo > ", limit_ribo, "\n", # Note: your script uses > for limit_ribo
+  "  Regressed Variables: ", paste(variables_to_regress, collapse = ", "), "\n",
+    "  Scenario: ", scenario_name, "\n",
+  "  Clustering Input: PCA Dims = ", dimen, ", Resolution = ", resol, "\n",
+  "Cluster Filtering for this Analysis:\n",
+  "  Minimum Cluster Size Threshold: ", percentage_threshold, "% of total cells\n",
+  "------------------------------------------------------------------------\n"
+)
+
+# --- Print the Title ---
+cat(parameter_title_filtered)
+
+cat(paste0("\nCalculating overall entropy scores on clusters >= ", percentage_threshold, "% of total cells for HB6.a_qc1...\n"))
+
+# --- 1. Identify clusters to exclude based on size ---
+original_cluster_counts <- table(HB6.a_qc1$seurat_clusters)
+total_cells <- ncol(HB6.a_qc1)
+cluster_percentages <- (original_cluster_counts / total_cells) * 100
+clusters_to_keep <- names(cluster_percentages[cluster_percentages >= percentage_threshold])
+clusters_to_exclude <- names(cluster_percentages[cluster_percentages < percentage_threshold])
+
+cat(paste0("\nCluster sizes (percentage of total cells):\n"))
+print(round(cluster_percentages, 2))
+
+if (length(clusters_to_exclude) > 0) {
+    cat(paste0("\nExcluding clusters with less than ", percentage_threshold, "% cells: ", paste(clusters_to_exclude, collapse = ", "), "\n"))
+    cat(paste0("Keeping clusters: ", paste(clusters_to_keep, collapse = ", "), "\n"))
+} else {
+    cat(paste0("\nNo clusters found with less than ", percentage_threshold, "% cells. All clusters will be included.\n"))
+}
+
+# --- 2. Subset the Seurat object to include only cells in large clusters ---
+HB6.a_qc1_large_clusters <- subset(HB6.a_qc1, idents = clusters_to_keep) # 'idents' relies on current Idents matching cluster names in clusters_to_keep
+                                                                        # If clusters_to_keep are from HB6.a_qc1$seurat_clusters, ensure Idents reflect that or use:
+# HB6.a_qc1_large_clusters <- subset(HB6.a_qc1, subset = seurat_clusters %in% clusters_to_keep)
+
+cat(paste0("Object subsetted. Original cells: ", total_cells, ". Cells after excluding small clusters: ", ncol(HB6.a_qc1_large_clusters), ".\n"))
+
+# --- 3. Calculate entropy and AMI on the SUBSETTED object ---
+cluster_identities_subset <- HB6.a_qc1_large_clusters$seurat_clusters
+original_samples_subset <- HB6.a_qc1_large_clusters$Population
+
+# Data type checks and coercive conversions for subsetted data removed.
+
+samples_split_by_cluster_subset <- split(original_samples_subset, cluster_identities_subset)
+# This line pre-filters empty groups.
+samples_split_by_cluster_subset <- samples_split_by_cluster_subset[sapply(samples_split_by_cluster_subset, length) > 0]
+
+individual_entropy_per_cluster <- sapply(samples_split_by_cluster_subset, function(samples_in_cluster) {
+  # Internal check for empty samples_in_cluster removed.
+  freq_table <- table(samples_in_cluster)
+  prob_dist <- prop.table(freq_table)
+  entropy_value <- entropy::entropy(prob_dist, method = "ML", unit = "log")
+  return(entropy_value)
+})
+
+cluster_counts_subset <- table(factor(cluster_identities_subset)) # Ensure factor for table
+# Adjust to only count relevant clusters if individual_entropy_per_cluster names are the source of truth
+cluster_counts_subset <- cluster_counts_subset[names(individual_entropy_per_cluster)]
+cluster_counts_subset <- cluster_counts_subset[!is.na(cluster_counts_subset)] # Remove NAs if any cluster dissapeared
+
+
+# --- Calculate Weighted Average Entropy on the SUBSETTED data (internal conditional logic removed) ---
+weighted_avg_entropy_filtered <- weighted.mean(individual_entropy_per_cluster, cluster_counts_subset, na.rm = TRUE)
+cat("\nWeighted Average Entropy (Population per cluster - excluding small clusters):\n")
+print(weighted_avg_entropy_filtered)
+
+# --- Calculate Adjusted Mutual Information (AMI) on the SUBSETTED data (internal conditional logic removed) ---
+ami_score_filtered <- aricode::AMI(cluster_identities_subset, original_samples_subset)
+cat("\nAdjusted Mutual Information (AMI) between remaining clusters and Population:\n")
+print(ami_score_filtered)
+```
+
+[Interpretation:]{.underline}
+
+**Weighted Average Entropy (filtered**): Average sample mixedness per cell across the remaining clusters.
+
+**AMI Score (filtered):** Agreement between clustering and Population labels for the remaining cells/clusters.
+
+These scores reflect the sample mixing \*only\* considering clusters \>= the  given % threshold.
+
+## Differential Gene Expression
+
+#### By Sorted population
+
+Graph with the most relevant 5 genes in each sorted population plus graph of other genes of interest:
+
+```{r DGE and Marker Validation - Simplified}
+
+
+# Description:
+# This script identifies and visualizes key marker genes for Seurat cell groups, using the 'orig.ident' column as the basis for grouping.
+# It assumes necessary variables and the Seurat object 'HB6.a_qc1' are correctly pre-loaded and configured.
+
+# --- Configuration ---
+# The Seurat object name is directly used: "HB6.a_qc1"
+# General analysis parameters (min_cells_threshold, etc.) and 'percentage_threshold'
+# are assumed to be defined in the environment.
+
+# --- Define Grouping Variable for DGE based on orig.ident ---
+grouping_variable_for_dge <- "orig.ident" # Explicitly setting as per script's intent
+
+cat("Available metadata columns in HB6.a_qc1:\n")
+print(colnames(HB6.a_qc1@meta.data))
+cat("\n")
+
+# Set Idents for DGE analysis based on these groups
+Idents(HB6.a_qc1) <- grouping_variable_for_dge # Or HB6.a_qc1[[grouping_variable_for_dge, drop=TRUE]]
+cat("Set Idents of HB6.a_qc1 to:", grouping_variable_for_dge, "for DGE analysis.\n")
+cat("Active groups for DGE:", paste(levels(Idents(HB6.a_qc1)), collapse=", "), "\n")
+
+# --- Assay and Slot Configuration ---
+RNA_ASSAY_NAME <- "RNA"
+DATA_SLOT <- "data"
+
+cat("Using assay '", RNA_ASSAY_NAME, "' and its '", DATA_SLOT, "' slot from HB6.a_qc1 for DGE and visualizations.\n", sep="")
+
+# --- Validate with an Expanded List of Canonical Gene Markers ---
+cat("\n[Optional Step] Validating groups with canonical gene marker expression (from '", RNA_ASSAY_NAME, "' assay of HB6.a_qc1)...\n", sep="")
+b_cell_markers_expanded <- unique(c(
+# "CD19", "MS4A1",    # General B cell (MS4A1 is CD20)
+#   "IGHD", "IGHM",    # Naive (IgD+, IgM+), IgM Memory (IgD+, IgM+)
+#   "CD27",            # Memory (CD27+)
+#   "MME",             # CD10 (Transitional: CD10+) - MME is official gene symbol for CD10
+  # "CD38", "CD24",    # CD24 high, CD38 high for Transitional
+  # "IGHG1", "IGHG4",   # Class-switched memory (IgG+)
+  # "IGHA1", "IGHA2",   # Class-switched memory (IgA+)
+  # "JCHAIN",          # Plasma cells, some plasmablasts
+  # "PAX5", "EBF1",    # B cell lineage transcription factors
+  # "AICDA",           # AID, for class switching and somatic hypermutation
+  # "CR2", "CD21",    # CR2 is official gene symbol for CD21
+  # "FCER2", "CD23"   # FCER2 is official gene symbol for CD23
+  "TCL1A","MS4A1","IGHM","IGHD", "MME","CD27","CD19"
+))
+
+present_rna_markers <- intersect(b_cell_markers_expanded, rownames(HB6.a_qc1[[RNA_ASSAY_NAME]]))
+
+cat("Found relevant RNA markers for plotting across groups:", paste(present_rna_markers, collapse=", "), "\n")
+# Directly plotting; DotPlot will error if present_rna_markers is empty.
+plot_dotplot_markers <- DotPlot(
+  HB6.a_qc1, 
+  features = rev(unique(present_rna_markers)), 
+  assay = RNA_ASSAY_NAME,
+  # OPTION 1: Sequential blue (low expression) to red (high expression)
+  cols = c("blue", "red") 
+  # OPTION 2: Diverging blue (low) - white (mid) - red (high)
+  # cols = c("blue", "white", "red") # Uncomment this line and comment out the one above to use this
+) +
+RotatedAxis() +
+ggtitle(paste("Key Canonical Marker Expression by Sorted population"
+              #, grouping_variable_for_dge
+              )
+        ) +
+theme(
+  plot.title = element_text(hjust = 0.5),
+  axis.text.x = element_text(size=12, angle = 90, hjust = 1, vjust = 0.5),
+  axis.text.y = element_text(size=12)
+  )  
+print(plot_dotplot_markers)
+
+# --- Step 2: Find and Visualize Top Differentially Expressed Genes for each Group ---
+cat("\nStep 2: Finding DGEs for each group in '", grouping_variable_for_dge, "' (from '", RNA_ASSAY_NAME, "' assay of HB6.a_qc1)...\n", sep="")
+
+all_markers_group <- FindAllMarkers(
+  HB6.a_qc1,
+  assay = RNA_ASSAY_NAME,
+  slot = DATA_SLOT,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  test.use = "wilcox",
+  verbose = TRUE 
+)
+
+cat("\nFound", nrow(all_markers_group), "total positive marker genes across all '", grouping_variable_for_dge, "' groups.\n", sep="")
+
+top_n_per_group <- 5
+top5_markers_per_group <- all_markers_group %>%
+  dplyr::group_by(cluster) %>% # 'cluster' column from FindAllMarkers refers to the ident groups
+  dplyr::slice_max(n = top_n_per_group, order_by = avg_log2FC, with_ties = FALSE) %>%
+  dplyr::ungroup() 
+
+# Print top markers with separation by group (as previously discussed)
+cat(paste0("\nTop ", top_n_per_group, " markers for each '", grouping_variable_for_dge, "' group (based on avg_log2FC):\n"))
+groups_in_dge_results <- unique(as.character(top5_markers_per_group$cluster)) 
+# To ensure consistent order for printing and plotting gene blocks, use levels of Idents
+ident_levels_for_order <- levels(Idents(HB6.a_qc1)) # Assuming Idents are set to grouping_variable_for_dge
+
+for (group_id in ident_levels_for_order) {
+  if (group_id %in% groups_in_dge_results) { # Only print if group has markers
+    cat("\n------------------------------------\n")
+    cat("--- Markers for Group:", group_id, "---\n")
+    group_specific_markers_df <- dplyr::filter(top5_markers_per_group, cluster == group_id)
+    print(as.data.frame(group_specific_markers_df))
+  }
+}
+cat("------------------------------------\n")
+
+# --- MODIFIED SECTION FOR ORDERED DOTPLOT WITH SEPARATOR LINES ---
+cat("\nGenerating DotPlot of unique top DGEs with group separators...\n")
+
+# 1. Create an ordered list of features for the DotPlot, preserving group blocks
+#    and calculate positions for separator lines.
+ordered_features_for_plot <- character(0)
+x_line_positions <- numeric(0) # To store x-intercepts for vlines
+cumulative_n_features_in_plot <- 0
+processed_genes_for_plot <- character(0) # Keep track of unique genes already added to the plot list
+
+for(i in seq_along(ident_levels_for_order)){
+  group_id <- ident_levels_for_order[i]
+  
+  # Get top genes for this group (already calculated in top5_markers_per_group)
+  group_top_genes <- top5_markers_per_group %>%
+    dplyr::filter(cluster == group_id) %>%
+    dplyr::pull(gene)
+  
+  # Identify which of these are new unique genes to add to our plot list
+  new_unique_genes_for_this_block <- setdiff(group_top_genes, processed_genes_for_plot)
+  
+  if (length(new_unique_genes_for_this_block) > 0) {
+    ordered_features_for_plot <- c(ordered_features_for_plot, new_unique_genes_for_this_block)
+    processed_genes_for_plot <- c(processed_genes_for_plot, new_unique_genes_for_this_block)
+    
+    # Add current cumulative count as a boundary before adding next block's new genes
+    # (unless it's the last group)
+    if (i < length(ident_levels_for_order)) {
+       # Only add a line if this block actually contributed new genes
+       # and there are more groups to come
+       new_cumulative_count <- length(processed_genes_for_plot)
+       # Check if this new_cumulative_count is different from the last line position to avoid duplicate lines
+       if (length(x_line_positions) == 0 || tail(x_line_positions, 1) != new_cumulative_count) {
+            x_line_positions <- c(x_line_positions, new_cumulative_count)
+       }
+    }
+  }
+}
+# Remove the last line position as we don't need a line after the very last group's block
+if (length(x_line_positions) > 0 && tail(x_line_positions, 1) == length(processed_genes_for_plot)) {
+    x_line_positions <- x_line_positions[-length(x_line_positions)]
+}
+
+
+if (length(ordered_features_for_plot) > 0) {
+  plot_dotplot_top_dges <- DotPlot(
+    HB6.a_qc1, 
+    features = rev(ordered_features_for_plot), # Use the new ordered list, reversed for typical DotPlot display
+    assay = RNA_ASSAY_NAME,
+    cols = c("blue", "red") 
+  ) +  
+  RotatedAxis() + # This means features are on the X-axis
+  ggtitle(paste("Top", top_n_per_group, "DGEs per Group (DotPlot) by", grouping_variable_for_dge)) +
+  ylab("Identity") + # Y-axis is now identities
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(size=8, angle = 90, hjust = 1, vjust = 0.5), # Rotate gene names further if needed
+    axis.text.y = element_text(size=8)
+  )
+  
+  # Add vertical lines if there are positions calculated
+  if (length(x_line_positions) > 0) {
+    # Since RotatedAxis() puts features on X, lines go at x-intercepts.
+    # The positions are between features, so feature 1 is at x=1, feature 2 at x=2 etc.
+    # A line after N features is at N + 0.5
+    plot_dotplot_top_dges <- plot_dotplot_top_dges + 
+      geom_vline(xintercept = x_line_positions + 0.5, linetype = "dashed", color = "grey50")
+  }
+  
+  print(plot_dotplot_top_dges)
+} else {
+  cat("No unique top DGE genes found to generate the DotPlot with separators.\n")
+}
+cat("\nGenerating Heatmap of top 5 markers per group using '", RNA_ASSAY_NAME, "' assay, '", DATA_SLOT, "' slot from HB6.a_qc1.\n", sep="")
+# Directly plotting; DoHeatmap will error if unique_top_dge_genes has <2 genes or ncol(HB6.a_qc1) < 2.
+plot_heatmap_top_markers <- DoHeatmap(
+    HB6.a_qc1,  
+    features = unique_top_dge_genes,
+    assay = RNA_ASSAY_NAME,
+    slot = DATA_SLOT,
+    label = TRUE  
+) +
+ggtitle(paste("Heatmap of Top", top_n_per_group, "Markers (Normalized Expression) per '", grouping_variable_for_dge, "' Group", sep="")) +
+theme(plot.title = element_text(hjust = 0.5))
+print(plot_heatmap_top_markers)
+
+cat(paste0("\nGenerating VlnPlots and FeaturePlots for top ", top_n_per_group, " markers of each '", grouping_variable_for_dge, "' group...\n"))
+
+original_default_assay_for_loop <- DefaultAssay(HB6.a_qc1)
+DefaultAssay(HB6.a_qc1) <- RNA_ASSAY_NAME
+cat(paste0("Temporarily setting DefaultAssay of HB6.a_qc1 to '", RNA_ASSAY_NAME, "' for FeaturePlots inside the loop.\n"))
+
+unique_groups_for_loop <- unique(as.character(top5_markers_per_group$cluster)) # Will be empty if no markers found
+
+for (current_group_id in unique_groups_for_loop) { # Loop won't run if unique_groups_for_loop is empty
+  cat("\n--- Visualizing top", top_n_per_group, "markers for group:", current_group_id, "---\n")
+  
+  genes_to_plot_for_group <- top5_markers_per_group %>%
+    dplyr::filter(cluster == current_group_id) %>%  
+    dplyr::pull(gene)
+
+  # Directly plotting; functions will error if genes_to_plot_for_group is empty or UMAP doesn't exist.
+  vln_plot_group_markers <- VlnPlot(
+    HB6.a_qc1,  
+    features = genes_to_plot_for_group, pt.size = 0,
+    assay = RNA_ASSAY_NAME, slot = DATA_SLOT,
+    ncol = min(length(genes_to_plot_for_group), 3) # min() will handle empty genes_to_plot_for_group returning 0
+  ) + plot_annotation(title = paste("Top", length(genes_to_plot_for_group), "Markers for Group:", current_group_id)) &
+    theme(plot.title = element_text(hjust = 0.5))
+  print(vln_plot_group_markers)
+  
+  # Directly attempting FeaturePlot; will error if "umap" reduction doesn't exist.
+  fp_group_markers <- FeaturePlot(
+    HB6.a_qc1, features = genes_to_plot_for_group, reduction = "umap", order = TRUE,
+    slot = DATA_SLOT, ncol = min(length(genes_to_plot_for_group), 3)
+  ) + plot_annotation(title = paste("Top", length(genes_to_plot_for_group), "Markers for Group:", current_group_id, "(FeaturePlot)")) &
+    theme(plot.title = element_text(hjust = 0.5))
+  print(fp_group_markers)
+}
+DefaultAssay(HB6.a_qc1) <- original_default_assay_for_loop # Restore
+cat(paste0("Restored DefaultAssay of HB6.a_qc1 to '", original_default_assay_for_loop, "'.\n"))
+
+cat("\n--- Focused Differential Gene Expression & Marker Validation Script Finished ---\n")
+```
+
+#### By cluster number
+
+```{r DGE_and_Marker_Validation_for_Unsupervised_Clusters_Simplified_Colors}
+
+# Description:
+# This script identifies and visualizes key marker genes for Seurat UN SUPERVISED CLUSTERS 
+# or for cluster labels derived from other annotations.
+# Assumes 'HB6.a_qc1' and necessary parameters are correctly pre-loaded and configured.
+# DotPlots use a blue-to-red color scale.
+
+# --- Configuration ---
+# The Seurat object name is directly used: "HB6.a_qc1"
+
+# --- Define Grouping Variable for DGE based on CLUSTERS ---
+# Ensure this metadata column contains your cluster IDs or annotated cluster labels.
+grouping_variable_for_dge <- "seurat_clusters" # <<<<<<< ADJUST THIS if your cluster column has a different name
+
+cat("Available metadata columns in HB6.a_qc1:\n")
+print(colnames(HB6.a_qc1@meta.data))
+cat("\n")
+
+# Set Idents for DGE analysis based on these cluster groups
+Idents(HB6.a_qc1) <- HB6.a_qc1[[grouping_variable_for_dge, drop=TRUE]]
+cat("Set Idents of HB6.a_qc1 to:", grouping_variable_for_dge, "for DGE analysis.\n")
+cat("Active groups for DGE:", paste(levels(Idents(HB6.a_qc1)), collapse=", "), "\n")
+
+# --- Assay and Slot Configuration ---
+RNA_ASSAY_NAME <- "RNA" 
+DATA_SLOT <- "data"   
+
+cat("Using assay '", RNA_ASSAY_NAME, "' and its '", DATA_SLOT, "' slot from HB6.a_qc1 for DGE and visualizations.\n", sep="")
+
+# --- Validate with a Focused List of Canonical Gene Markers ---
+cat("\n[Optional Step] Validating CLUSTER groups with canonical gene marker expression (from '", RNA_ASSAY_NAME, "' assay of HB6.a_qc1)...\n", sep="")
+b_cell_markers_expanded <- unique(c( 
+"CD19", "MS4A1",    # General B cell (MS4A1 is CD20)
+  "IGHD", "IGHM",    # Naive (IgD+, IgM+), IgM Memory (IgD+, IgM+)
+  "CD27",            # Memory (CD27+)
+  "MME",             # CD10 (Transitional: CD10+) - MME is official gene symbol for CD10
+  "CD38", "CD24",    # CD24 high, CD38 high for Transitional
+  "IGHG1", "IGHG4",   # Class-switched memory (IgG+)
+  "IGHA1", "IGHA2",   # Class-switched memory (IgA+)
+  "JCHAIN",          # Plasma cells, some plasmablasts
+  "PAX5", "EBF1",    # B cell lineage transcription factors
+  "AICDA",           # AID, for class switching and somatic hypermutation
+  "CR2", "CD21",    # CR2 is official gene symbol for CD21
+  "FCER2", "CD23"   # FCER2 is official gene symbol for CD23
+))
+
+present_rna_markers <- intersect(b_cell_markers_expanded, rownames(HB6.a_qc1[[RNA_ASSAY_NAME]]))
+
+cat("Found relevant RNA markers for plotting across clusters:", paste(present_rna_markers, collapse=", "), "\n")
+# Directly plotting; DotPlot will error if present_rna_markers is empty.
+plot_dotplot_markers <- DotPlot(
+  HB6.a_qc1, 
+  features = rev(unique(present_rna_markers)), 
+  assay = RNA_ASSAY_NAME,
+  cols = c("blue", "red") # Added color
+) + 
+RotatedAxis() +
+ggtitle(paste("Key Canonical Marker Expression (DotPlot) by", grouping_variable_for_dge)) +
+theme(plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(size=8),
+      axis.text.y = element_text(size=8))
+print(plot_dotplot_markers)
+
+# --- Step 2: Find and Visualize Top 5 Differentially Expressed Genes for each CLUSTER Group ---
+cat("\nStep 2: Finding DGEs for each group in '", grouping_variable_for_dge, "' (from '", RNA_ASSAY_NAME, "' assay of HB6.a_qc1)...\n", sep="")
+
+all_markers_cluster <- FindAllMarkers(
+  HB6.a_qc1, 
+  assay = RNA_ASSAY_NAME,
+  slot = DATA_SLOT,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  test.use = "wilcox",
+  verbose = TRUE # Set to FALSE if you want less console output
+)
+
+cat("\nFound", nrow(all_markers_cluster), "total positive marker genes across all '", grouping_variable_for_dge, "' groups.\n", sep="")
+
+top_n_per_group <- 5
+top5_markers_per_cluster <- all_markers_cluster %>%
+  dplyr::group_by(cluster) %>% 
+  dplyr::slice_max(n = top_n_per_group, order_by = avg_log2FC, with_ties = FALSE) %>%
+  dplyr::ungroup() # Ungroup for the loop or other operations
+
+cat(paste0("\nTop ", top_n_per_group, " markers for each '", grouping_variable_for_dge, "' group (based on avg_log2FC):\n"))
+# Modified print loop for clarity (from previous request context)
+groups_in_dge_results <- unique(as.character(top5_markers_per_cluster$cluster))
+ident_levels_for_order <- levels(Idents(HB6.a_qc1))
+
+for (group_id in ident_levels_for_order) {
+  if (group_id %in% groups_in_dge_results) { 
+    cat("\n------------------------------------\n")
+    cat("--- Markers for Group:", group_id, "---\n")
+    group_specific_markers_df <- dplyr::filter(top5_markers_per_cluster, cluster == group_id)
+    print(as.data.frame(group_specific_markers_df))
+  }
+}
+cat("------------------------------------\n")
+
+
+unique_top_dge_genes <- unique(top5_markers_per_cluster$gene)
+cat("\nGenerating DotPlot of unique top DGEs across all cluster groups using '", RNA_ASSAY_NAME, "' assay from HB6.a_qc1.\n", sep="")
+# Directly plotting; DotPlot will error if unique_top_dge_genes is empty.
+plot_dotplot_top_dges <- DotPlot(
+  HB6.a_qc1, 
+  features = rev(unique(unique_top_dge_genes)), 
+  assay = RNA_ASSAY_NAME,
+  cols = c("blue", "red") # Added color
+) + 
+RotatedAxis() +
+ggtitle(paste("Top", top_n_per_group, "DGEs per Cluster Group (DotPlot) by", grouping_variable_for_dge)) +
+theme(plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(size=8),  
+      axis.text.y = element_text(size=8))
+print(plot_dotplot_top_dges)
+
+cat("\nGenerating Heatmap of top 5 markers per cluster group using '", RNA_ASSAY_NAME, "' assay, '", DATA_SLOT, "' slot from HB6.a_qc1.\n", sep="")
+# Directly plotting; DoHeatmap might error if unique_top_dge_genes has <2 genes or object has <2 cells.
+plot_heatmap_top_markers <- DoHeatmap(
+    HB6.a_qc1, 
+    features = unique_top_dge_genes,
+    assay = RNA_ASSAY_NAME,
+    slot = DATA_SLOT,
+    label = TRUE
+) +
+ggtitle(paste("Heatmap of Top", top_n_per_group, "Markers (Normalized Expression) per '", grouping_variable_for_dge, "' Group", sep="")) +
+theme(plot.title = element_text(hjust = 0.5))
+print(plot_heatmap_top_markers)
+
+cat(paste0("\nGenerating VlnPlots and FeaturePlots for top ", top_n_per_group, " markers of each '", grouping_variable_for_dge, "' group...\n"))
+
+original_default_assay_for_loop <- DefaultAssay(HB6.a_qc1)
+DefaultAssay(HB6.a_qc1) <- RNA_ASSAY_NAME 
+cat(paste0("Temporarily setting DefaultAssay of HB6.a_qc1 to '", RNA_ASSAY_NAME, "' for FeaturePlots inside the loop.\n"))
+
+# Iterate using groups_in_dge_results or ident_levels_for_order if you want to ensure order and include all groups
+for (current_cluster_group in ident_levels_for_order) { 
+  if (current_cluster_group %in% groups_in_dge_results) { # Only proceed if group had top markers
+    cat("\n--- Visualizing top", top_n_per_group, "markers for cluster group:", current_cluster_group, "---\n")
+    
+    genes_to_plot_for_group <- top5_markers_per_cluster %>%
+      dplyr::filter(cluster == current_cluster_group) %>% 
+      dplyr::pull(gene)
+
+    # Assuming Idents(HB6.a_qc1) are set to grouping_variable_for_dge for VlnPlot
+    vln_plot_group_markers <- VlnPlot(
+      HB6.a_qc1, features = genes_to_plot_for_group, pt.size = 0,
+      assay = RNA_ASSAY_NAME, slot = DATA_SLOT,
+      ncol = min(length(genes_to_plot_for_group), 3) 
+    ) + plot_annotation(title = paste("Top", length(genes_to_plot_for_group), "Markers for Group:", current_cluster_group)) &
+      theme(plot.title = element_text(hjust = 0.5))
+    print(vln_plot_group_markers)
+    
+    # Assumes "umap" reduction exists
+    fp_group_markers <- FeaturePlot(
+      HB6.a_qc1, features = genes_to_plot_for_group, reduction = "umap", order = TRUE,
+      slot = DATA_SLOT, ncol = min(length(genes_to_plot_for_group), 3)
+    ) + plot_annotation(title = paste("Top", length(genes_to_plot_for_group), "Markers for Group:", current_cluster_group, "(FeaturePlot)")) &
+      theme(plot.title = element_text(hjust = 0.5))
+    print(fp_group_markers)
+  }
+}
+DefaultAssay(HB6.a_qc1) <- original_default_assay_for_loop 
+cat(paste0("Restored DefaultAssay of HB6.a_qc1 to '", original_default_assay_for_loop, "'.\n"))
+
+cat("\n--- Focused Differential Gene Expression & Marker Validation Script Finished ---\n")
+```
+
+#### By cluster with most prevalent population:
+
+?
+
+```{r}
+
+# {r DGE_and_Marker_Validation_for_Clusters_with_Annotated_Y_Axis_Simplified_Colors}
+
+# Description:
+# This script identifies and visualizes key marker genes for Seurat UN SUPERVISED CLUSTERS
+# or for cluster labels derived from other annotations. The y-axis of DotPlots will be annotated 
+# with the most prevalent 'orig.ident' for each cluster. DotPlots use a blue-to-red color scale.
+# Assumes 'HB6.a_qc1' and necessary parameters are correctly pre-loaded and configured.
+
+# --- Configuration ---
+# Seurat object name is directly used: "HB6.a_qc1"
+
+# --- Define Grouping Variable for DGE based on CLUSTERS ---
+grouping_variable_for_dge <- "seurat_clusters" # << ADJUST THIS to your cluster metadata column
+
+cat("Available metadata columns in HB6.a_qc1:\n")
+print(colnames(HB6.a_qc1@meta.data))
+cat("\n")
+
+# Set Idents for DGE analysis (will be used by FindAllMarkers)
+Idents(HB6.a_qc1) <- HB6.a_qc1[[grouping_variable_for_dge, drop=TRUE]]
+cat("Set Idents of HB6.a_qc1 to:", grouping_variable_for_dge, "for DGE analysis.\n")
+cat("Active groups for DGE:", paste(levels(Idents(HB6.a_qc1)), collapse=", "), "\n")
+
+# --- Assay and Slot Configuration ---
+RNA_ASSAY_NAME <- "RNA"
+DATA_SLOT <- "data"
+
+cat("Using assay '", RNA_ASSAY_NAME, "' and its '", DATA_SLOT, "' slot from HB6.a_qc1 for visualizations.\n", sep="")
+
+# --- Prepare Annotated Cluster Labels for DotPlot Y-axis ---
+# Assumes 'orig.ident' column exists in HB6.a_qc1@meta.data
+cat("\nPreparing annotated Y-axis labels for DotPlots based on most prevalent 'orig.ident'...\n")
+current_cluster_ids <- Idents(HB6.a_qc1) 
+cluster_origin_counts <- table(ClusterID = current_cluster_ids, Origin = HB6.a_qc1$orig.ident)
+most_prevalent_origin_map <- apply(cluster_origin_counts, 1, function(counts) {
+  names(which.max(counts))
+})
+cluster_origin_prop_for_purity <- prop.table(cluster_origin_counts, margin = 1)
+purity_per_cluster <- sapply(rownames(cluster_origin_prop_for_purity), function(cl_id) {
+  max(cluster_origin_prop_for_purity[cl_id, ])
+})
+ordered_cluster_levels_by_purity <- names(sort(purity_per_cluster, decreasing = TRUE))
+
+y_axis_labels_list <- Hmisc::capitalize(paste0( # Assumes Hmisc is loaded
+  ordered_cluster_levels_by_purity,
+  " (",
+  most_prevalent_origin_map[ordered_cluster_levels_by_purity],
+  ")"
+))
+
+temp_annotated_labels <- character(length = ncol(HB6.a_qc1))
+original_cluster_values <- as.character(current_cluster_ids)
+for(i in seq_along(ordered_cluster_levels_by_purity)){
+  cluster_id_for_map <- ordered_cluster_levels_by_purity[i]
+  label_for_map <- y_axis_labels_list[i]
+  temp_annotated_labels[original_cluster_values == cluster_id_for_map] <- label_for_map
+}
+HB6.a_qc1$y_axis_annotated_labels <- factor(temp_annotated_labels, levels = y_axis_labels_list)
+cat("Created 'y_axis_annotated_labels' metadata column for DotPlot Y-axis.\n")
+print(levels(HB6.a_qc1$y_axis_annotated_labels))
+
+# --- [Optional Step] Validate with Canonical Gene Markers using Annotated Y-axis ---
+cat("\n[Optional Step] Validating CLUSTER groups with canonical gene marker expression...\n")
+b_cell_markers_expanded <- unique(c(
+  "CD19", "MS4A1",    # General B cell (MS4A1 is CD20)
+  "IGHD", "IGHM",    # Naive (IgD+, IgM+), IgM Memory (IgD+, IgM+)
+  "CD27",            # Memory (CD27+)
+  "MME",             # CD10 (Transitional: CD10+) - MME is official gene symbol for CD10
+  "CD38", "CD24",    # CD24 high, CD38 high for Transitional
+  "IGHG1", "IGHG4",   # Class-switched memory (IgG+)
+  "IGHA1", "IGHA2",   # Class-switched memory (IgA+)
+  "JCHAIN",          # Plasma cells, some plasmablasts
+  "PAX5", "EBF1",    # B cell lineage transcription factors
+  "AICDA",           # AID, for class switching and somatic hypermutation
+  "CR2", "CD21",    # CR2 is official gene symbol for CD21
+  "FCER2", "CD23"   # FCER2 is official gene symbol for CD23
+))
+present_rna_markers <- intersect(b_cell_markers_expanded, rownames(HB6.a_qc1[[RNA_ASSAY_NAME]]))
+
+cat("Plotting DotPlot for canonical markers with annotated Y-axis...\n")
+# Directly plotting; DotPlot will error if present_rna_markers is empty.
+plot_dotplot_markers <- DotPlot(HB6.a_qc1,  
+                                features = rev(unique(present_rna_markers)),  
+                                assay = RNA_ASSAY_NAME,  
+                                group.by = "y_axis_annotated_labels",
+                                cols = c("blue", "red")) + # Added color
+  RotatedAxis() + 
+  ggtitle(paste("Key Canonical Marker Expression (DotPlot) by Annotated Cluster")) +
+  ylab("Cluster (Most Prevalent Origin) - Ordered by Purity") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(size=8),
+        axis.text.y = element_text(size=8)) 
+print(plot_dotplot_markers)
+
+# --- Step 2: Find and Visualize Top 5 DGEs for each CLUSTER Group ---
+cat("\nStep 2: Finding DGEs for each group in '", grouping_variable_for_dge, "'...\n", sep="")
+all_markers_cluster <- FindAllMarkers(
+  HB6.a_qc1, assay = RNA_ASSAY_NAME, slot = DATA_SLOT, only.pos = TRUE,
+  min.pct = 0.25, logfc.threshold = 0.25, test.use = "wilcox", verbose = TRUE
+)
+
+cat("\nFound", nrow(all_markers_cluster), "total positive marker genes.\n")
+top_n_per_group <- 5
+top5_markers_per_cluster <- all_markers_cluster %>%
+  dplyr::group_by(cluster) %>% 
+  dplyr::slice_max(n = top_n_per_group, order_by = avg_log2FC, with_ties = FALSE) %>%
+  dplyr::ungroup()
+cat(paste0("\nTop ", top_n_per_group, " markers for each '", grouping_variable_for_dge, "' group:\n"))
+print(as.data.frame(top5_markers_per_cluster)) # Print the whole table
+
+unique_top_dge_genes <- unique(top5_markers_per_cluster$gene)
+cat("\nGenerating DotPlot of unique top DGEs with annotated Y-axis...\n")
+# Directly plotting; DotPlot will error if unique_top_dge_genes is empty.
+plot_dotplot_top_dges <- DotPlot(HB6.a_qc1,  
+                                 features = rev(unique(unique_top_dge_genes)),  
+                                 assay = RNA_ASSAY_NAME,
+                                 group.by = "y_axis_annotated_labels",
+                                 cols = c("blue", "red")) + # Added color
+    RotatedAxis() + 
+    ggtitle(paste("Top", top_n_per_group, "DGEs per Cluster (DotPlot) by Annotated Cluster")) +
+    ylab("Cluster (Most Prevalent Origin) - Ordered by Purity") + 
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(size=8),  
+          axis.text.y = element_text(size=8))
+print(plot_dotplot_top_dges)
+
+cat("\nGenerating Heatmap of top 5 markers per cluster group...\n")
+# Directly plotting; DoHeatmap might error if unique_top_dge_genes has <2 genes or object has <2 cells.
+plot_heatmap_top_markers <- DoHeatmap(
+    HB6.a_qc1, 
+    features = unique_top_dge_genes,
+    assay = RNA_ASSAY_NAME, slot = DATA_SLOT, label = TRUE,
+    group.by = "y_axis_annotated_labels" 
+) +
+ggtitle(paste("Heatmap of Top Markers per Annotated Cluster")) +
+theme(plot.title = element_text(hjust = 0.5))
+print(plot_heatmap_top_markers)
+
+cat(paste0("\nGenerating VlnPlots and FeaturePlots for top ", top_n_per_group, " markers of each original cluster group...\n"))
+original_default_assay_for_loop <- DefaultAssay(HB6.a_qc1)
+DefaultAssay(HB6.a_qc1) <- RNA_ASSAY_NAME
+cat(paste0("Temporarily setting DefaultAssay to '", RNA_ASSAY_NAME, "' for FeaturePlots.\n"))
+
+unique_cluster_groups_for_loop <- unique(as.character(top5_markers_per_cluster$cluster))
+
+for (current_cluster_group_id in unique_cluster_groups_for_loop) { 
+  annotated_label_for_title_candidates <- levels(HB6.a_qc1$y_axis_annotated_labels)[grepl(paste0("^",current_cluster_group_id,"\\s*\\("), levels(HB6.a_qc1$y_axis_annotated_labels))]
+  annotated_label_for_title <- if(length(annotated_label_for_title_candidates) > 0) annotated_label_for_title_candidates[1] else current_cluster_group_id 
+
+  cat("\n--- Visualizing top", top_n_per_group, "markers for group:", annotated_label_for_title, "---\n")
+  genes_to_plot_for_group <- top5_markers_per_cluster %>%
+    dplyr::filter(cluster == current_cluster_group_id) %>% dplyr::pull(gene)
+
+  vln_plot_group_markers <- VlnPlot(
+    HB6.a_qc1, 
+    features = genes_to_plot_for_group, pt.size = 0, assay = RNA_ASSAY_NAME, slot = DATA_SLOT,
+    ncol = min(length(genes_to_plot_for_group), 3) 
+  ) + plot_annotation(title = paste("Top Markers for:", annotated_label_for_title)) &
+    theme(plot.title = element_text(hjust = 0.5))
+  print(vln_plot_group_markers)
+  
+  fp_group_markers <- FeaturePlot(
+    HB6.a_qc1, features = genes_to_plot_for_group, reduction = "umap", order = TRUE,
+    slot = DATA_SLOT, ncol = min(length(genes_to_plot_for_group), 3)
+  ) + plot_annotation(title = paste("Top Markers for:", annotated_label_for_title, "(FeaturePlot)")) &
+    theme(plot.title = element_text(hjust = 0.5))
+  print(fp_group_markers)
+}
+DefaultAssay(HB6.a_qc1) <- original_default_assay_for_loop
+cat(paste0("Restored DefaultAssay to '", original_default_assay_for_loop, "'.\n"))
+
+cat("\n--- Focused Differential Gene Expression & Marker Validation Script Finished ---\n")
+```
+
+#### Session Info
+
+```{r}
+sessionInfo()
+```
