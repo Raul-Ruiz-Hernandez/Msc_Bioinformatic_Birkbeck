@@ -1,8 +1,8 @@
 # Msc_Bioinformatic_Birkbeck
 R code for data analysis
 DATAsets (dgMatrices) FILES for HB6:
-•	dn_filtered_feature_bc_matrix.h5:  https://www.ebi.ac.uk/biostudies/ArrayExpress/studies/E-MTAB-9544?query=E-MTAB-9544).
-•	classical_filtered_feature_bc_matrix.h5:
+-	dn_filtered_feature_bc_matrix.h5:  https://www.ebi.ac.uk/biostudies/ArrayExpress/studies/E-MTAB-9544?query=E-MTAB-9544).
+-	classical_filtered_feature_bc_matrix.h5:
  https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/544/E-MTAB-9544/Files/classical_filtered_feature_bc_matrix.h5
 •	naive_filtered_feature_bc_matrix.h5:
 https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/544/E-MTAB-9544/Files/naive_filtered_feature_bc_matrix.h5
