@@ -4,11 +4,11 @@ DATAsets (dgMatrices) FILES for HB6:
 -	dn_filtered_feature_bc_matrix.h5:  https://www.ebi.ac.uk/biostudies/ArrayExpress/studies/E-MTAB-9544?query=E-MTAB-9544).
 -	classical_filtered_feature_bc_matrix.h5:
  https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/544/E-MTAB-9544/Files/classical_filtered_feature_bc_matrix.h5
-•	naive_filtered_feature_bc_matrix.h5:
+-	naive_filtered_feature_bc_matrix.h5:
 https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/544/E-MTAB-9544/Files/naive_filtered_feature_bc_matrix.h5
-•	 igmmem_filtered_feature_bc_matrix.h5:
+- igmmem_filtered_feature_bc_matrix.h5:
 https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/544/E-MTAB-9544/Files/igmmem_filtered_feature_bc_matrix.h5
-•	trans_filtered_feature_bc_matrix.h5:
+-	trans_filtered_feature_bc_matrix.h5:
 https://ftp.ebi.ac.uk/biostudies/fire/E-MTAB-/544/E-MTAB-9544/Files/trans_filtered_feature_bc_matrix.h5
 
 DATAset (Merger Seurat Object) FILES for HB6,HB34 & HB78 donors:
