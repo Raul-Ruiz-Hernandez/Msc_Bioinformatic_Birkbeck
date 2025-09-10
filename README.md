@@ -23,8 +23,8 @@ This File Contains at certain section (in brackets):
 - Figure 1 (Section : Introduction subset paper/peripheral blood B cell scRNA-seq)
 - Figure 2 (Section: CLUSTERING/Differential Gene Expression/By Sorted population).
 - Figure 3 ( Section : QC. Filtering the raw (non-normalized data)/ Find variable Features: Selection of highly variable features/Before pruning Ig and TCR related genes)
--Figure 6.A&B ( section: Clustering representation)
--Figure 6.C ( section: Graph for purity each cluster (I) )
+- Figure 6.A&B ( section: Clustering representation)
+- Figure 6.C ( section: Graph for purity each cluster (I) )
 
 (2) HB6.Thesis Analysis.Supervised_Clustering.Rmd:
 This File Contains at certain section (in brackets):
