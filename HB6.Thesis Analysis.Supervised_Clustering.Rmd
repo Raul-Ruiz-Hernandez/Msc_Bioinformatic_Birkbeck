@@ -2422,8 +2422,8 @@ score_df <- read.table(text = score_data_text, header = TRUE, sep = "\t")
 # This helps distinguish between the two types of experiments you ran.
 score_df <- score_df %>%
   mutate(Analysis_Type = case_when(
-    grepl("top_", IG_TCR) ~ "by Top N Genes",
-    TRUE                 ~ "By Ig/TCR Filtering"
+    grepl("top_", IG_TCR) ~ "Selecting Top N Genes (positive control)",
+    TRUE                 ~ "g/TCR selective Filtering"
   ))
 
 # --- 3. Create the Scatter Plot ---
